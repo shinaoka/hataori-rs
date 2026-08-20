@@ -1,7 +1,10 @@
 # Hataori P0 Design
 
-**Status:** Final design consensus  
+**Status:** Final design consensus
+
 **Scope:** A generic synchronous collective data-parallel engine for MPI ranks and rank-local Rayon execution domains
+
+**Tracking:** [hataori-rs#1](https://github.com/shinaoka/hataori-rs/issues/1), [tenferro-rs#1716](https://github.com/tensor4all/tenferro-rs/issues/1716), [tensor4all-rs#663](https://github.com/tensor4all/tensor4all-rs/issues/663)
 
 ## 1. Positioning
 
