@@ -8,6 +8,12 @@
 
 ## 1. Positioning
 
+### Name
+
+**Hataori** comes from the Japanese word **機織り** (*hataori*), meaning weaving on a loom. The name reflects the engine's job: weave independent strands of work across MPI ranks and Rayon threads into one ordered result.
+
+### Scope
+
 Hataori makes common local, process-parallel, and hybrid data-parallel execution easy:
 
 | Cargo features | Execution mode |
