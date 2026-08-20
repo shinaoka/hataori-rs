@@ -186,6 +186,17 @@ READY(rank, domain=0)
 
 The MPI initialization thread drives all communication. CPU work runs in the rank's execution domain. The coordinator has no dedicated CPU in P0 and makes no communication/computation-overlap guarantee.
 
+### Future-compatible scheduler seams
+
+P0's queue is seeded once and cannot grow after `pmap` starts. Its implementation must nevertheless preserve four small seams for a later controller-driven expanding work queue:
+
+- quiescence is `pending queue empty && in_flight == 0`, not completion of a counter fixed to the initial input length;
+- every dispatched item has a stable internal task ID independent of its `pmap` result position; fixed-input `pmap` separately maps that ID to the original index;
+- receiving and decoding a result is separate from writing it into `pmap`'s ordered `Vec<U>`;
+- deciding that an empty queue is terminal is separate from sending `STOP`.
+
+These are internal scheduler boundaries, not new P0 public APIs. P0 may send `STOP` as soon as its immutable queue is empty; a future expanding queue must instead retain an idle worker's outstanding `READY` while other tasks remain in flight, because a later result may generate more work. The worker protocol already supports later task insertion because workers only request work with `READY`; it does not need remote spawn, futures, a task registry, or closure transmission.
+
 ## 8. Error and drain protocol
 
 After the first recoverable error:
@@ -355,6 +366,7 @@ Backend-specific errors do not enter the core error enum.
 ## 17. Explicit P0 non-goals
 
 - Arbitrary `remotecall`, spawn, futures, task graphs, or task registries
+- Controller-generated task insertion or an expanding work queue; this is a separate P1 candidate
 - Remote object handles, channels, distributed reference counting, or distributed GC
 - Dynamic process creation; ranks are owned by the MPI launcher or scheduler
 - Transmitting Rust closures or executable code
@@ -383,6 +395,35 @@ Prototype init-thread `Isend`/`Irecv`/`Test*` with at most one running and one p
 - FUNNELED identity, ordering, draining, and reuse remain correct.
 
 Only a detached/overlapped entry that truly requires ownership may add `Send + 'static`; those bounds must not leak into P0 scoped APIs.
+
+### Controller-driven expanding work queue
+
+A separate P1 entry may let the root controller analyze each completed result and enqueue zero or more new tasks:
+
+```text
+seed tasks -> worker result -> root controller analysis -> zero or more new tasks
+```
+
+This extension fits the P0 architecture without replacing its scheduler:
+
+- the root remains the sole queue owner and task producer;
+- generated tasks are owned values of the same task type and use the existing `TASK`/`RESULT` wire path;
+- task IDs are assigned by the controller when tasks are accepted;
+- the existing `READY` protocol schedules both seed and generated tasks;
+- when the queue is temporarily empty but work remains in flight, the root parks outstanding `READY` requests rather than replying `STOP`;
+- termination occurs only when the queue is empty, no task is in flight, and the controller callback has returned without adding work; only then does the root reply `STOP` to parked workers.
+
+Each `READY` still receives exactly one eventual `TASK` or `STOP`; no new worker message is required.
+
+The initial version should use a synchronous root-side result callback. The full result payload must be received and decoded before the callback runs. The callback may update controller-local state and enqueue tasks, but must not call MPI collectives or wait for distributed work. While it runs, FUNNELED MPI progress pauses; this is correct but may reduce utilization for expensive analysis. Moving expensive analysis off the MPI thread or overlapping it with communication is a later optimization and must use the nonblocking-overlap gate rather than complicating the first version.
+
+The callback and worker remain scoped to the enclosing call, so this feature does not by itself require `'static`. It is not arbitrary remote spawn: no closure, function, context, or controller state crosses ranks. A controller callback error follows the existing failure rule: stop accepting and assigning new tasks, drain already dispatched work, and publish one final error.
+
+Before implementation, the API must choose an explicit pending-queue memory policy. It must not silently create an unbounded queue: either configure a maximum and return ownership when enqueue cannot be accepted, or use a demand-driven producer contract. This choice can be made with the first real workload and does not require a P0 placeholder abstraction.
+
+Controller callbacks observe completion order. Task IDs are monotonic in controller acceptance order, but result-dependent task generation is not guaranteed to be reproducible across different completion orders. Applications requiring deterministic expansion must make their controller logic order-independent or explicitly buffer/order completed results.
+
+This capability is independent of remote futures, distributed object handles, task registries, and dynamic process creation. It should be added only when a concrete adaptive or recursive workload provides its API and backpressure requirements.
 
 ### Other P1 candidates
 
