@@ -20,12 +20,42 @@ Hataori makes common local, process-parallel, and hybrid data-parallel execution
 |---|---|
 | none | single process, single thread |
 | `rayon` | single process, multiple threads |
-| `mpi` | multiple processes, one compute lane per rank |
-| `mpi,rayon` | multiple processes, one multithreaded execution domain per rank |
+| `mpi` | multiple processes through upstream rsmpi, one compute lane per rank |
+| `mpi,rayon` | upstream rsmpi plus one multithreaded execution domain per rank |
+| `rsmpi-rt` | runtime-loaded MPI, one compute lane per rank |
+| `rsmpi-rt,rayon` | runtime-loaded MPI plus one multithreaded execution domain per rank |
 
 Hataori is inspired by Distributed.jl's dynamically scheduled `pmap`, but P0 is not a Distributed.jl-equivalent distributed object runtime. It does not provide arbitrary remote calls, futures, remote object handles, distributed garbage collection, or dynamic process creation.
 
 The default cross-rank path uses serialization. Applications needing zero-copy communication, MPI derived datatypes, GPU-aware MPI, custom collectives, or specialized communication should use MPI directly.
+
+### Dependency policy
+
+The default build is standard-library-only. P0 keeps one crate with optional features rather than splitting every backend into a separate abstraction crate:
+
+| Feature | Direct dependency added |
+|---|---|
+| `rayon` | `rayon` |
+| `mpi` | upstream `mpi` (rsmpi), `serde`, and `bincode` |
+| `rsmpi-rt` | [`tensor4all/rsmpi-rt`](https://github.com/tensor4all/rsmpi-rt) as package `mpi`, plus `serde` and `bincode` |
+| Linux managed affinity | `libc` |
+
+The optional tensor integration is a separate adapter crate depending on Hataori, tenferro, and tensor4all so those dependency trees never enter ordinary Hataori builds.
+
+Hataori uses standard-library collections, synchronization, channels, and errors. P0 does not add an async runtime, general channel/locking crate, error-derive crate, logging facade, CLI framework, topology library, or generic transport/executor plugin system.
+
+#### MPI backend features
+
+`mpi` and `rsmpi-rt` provide the same Hataori API and are mutually exclusive. Enabling both is a compile error.
+
+- `mpi` uses the upstream rsmpi crate and its conventional build/link-time system MPI backend.
+- `rsmpi-rt` uses the API-compatible rsmpi v0.8.1 fork with `default-features = false` and only `mpi-rt-sys-backend`. Until a compatible release exists, Hataori pins an exact git revision rather than tracking a branch.
+- Hataori does not enable rsmpi's optional `user-operations`, `derive`, or `complex` features. P0 needs only built-in MPI operations and manually encoded protocol headers.
+- A tiny private module aliases the selected crate as the MPI backend. Hataori does not introduce a public transport trait solely to hide two API-compatible implementations.
+
+The runtime-loaded backend requires no C compiler, MPI headers, system MPI, or libclang at Hataori build time. At runtime it requires an MPIABI-compatible MPIwrapper library selected through `MPI_RT_LIB`; symbol loading is provided by `mpi-rt-sys`/`libloading`.
+
+Hataori accepts a communicator and does not require ownership of MPI initialization or finalization. This lets an `rsmpi-rt` build share the MPI library and communicator initialized by MPI.jl or mpi4py. Both backends retain the same `MPI_THREAD_FUNNELED` and initialization-thread rules.
 
 ## 2. Architectural boundary
 
@@ -310,6 +340,8 @@ Core rejects before work begins:
 - domain admission contention or budget overflow;
 - requests for P0 overlap or dedicated-coordinator behavior.
 
+The build rejects simultaneous `mpi` and `rsmpi-rt` features.
+
 The optional adapter separately rejects:
 
 - duplicate Hataori and tenferro CPU admission;
@@ -351,6 +383,10 @@ Backend-specific errors do not enter the core error enum.
 - Local non-serialized use is not forced to implement serde.
 - No communicator or backend receives an unsafe thread-safety wrapper.
 - Core's feature matrix builds without tenferro or tensor4all in its dependency tree.
+- Default and Rayon-only builds contain no MPI, serde, or bincode dependency.
+- `mpi` and `rsmpi-rt` each build the same Hataori MPI API; enabling both fails at compile time.
+- An `rsmpi-rt` build succeeds without MPI headers, a C compiler, or libclang, then passes a multi-rank smoke test with `MPI_RT_LIB` set.
+- Hataori can use a caller-supplied communicator without owning MPI initialization/finalization.
 
 ### Three-repository integration
 
