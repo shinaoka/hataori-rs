@@ -24,8 +24,11 @@ cp target/debug/examples/rsmpi_rt_placement_smoke "$tmp_dir/runtime"
 
 launcher=${MPIEXEC:-mpiexec}
 launcher_flags=()
-if "$launcher" --version 2>&1 | grep -Eq 'Open MPI|OpenRTE' && ((EUID == 0)); then
-    launcher_flags+=(--allow-run-as-root)
+if "$launcher" --version 2>&1 | grep -Eq 'Open MPI|OpenRTE'; then
+    launcher_flags+=(--oversubscribe)
+    if ((EUID == 0)); then
+        launcher_flags+=(--allow-run-as-root)
+    fi
 fi
 
 for backend in upstream runtime; do

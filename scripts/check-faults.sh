@@ -19,8 +19,11 @@ export BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-"-I$(gcc -print-file
 
 launcher=${MPIEXEC:-mpiexec}
 launcher_flags=()
-if "$launcher" --version 2>&1 | grep -Eq 'Open MPI|OpenRTE' && ((EUID == 0)); then
-    launcher_flags+=(--allow-run-as-root)
+if "$launcher" --version 2>&1 | grep -Eq 'Open MPI|OpenRTE'; then
+    launcher_flags+=(--oversubscribe)
+    if ((EUID == 0)); then
+        launcher_flags+=(--allow-run-as-root)
+    fi
 fi
 
 build_test_binary() {

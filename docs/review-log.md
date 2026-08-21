@@ -225,3 +225,4 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only; bounded evidence retry after repository timeout)
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
+- CI remediation: the first Task #19 workflow run reached the MPI matrix but Open MPI rejected n=4 on a two-slot runner. All OpenMPI-only launch paths now add `--oversubscribe` without reducing rank coverage; the reviewer confirmed the delta **Correct-to-merge** and the full local core matrix passed again.
