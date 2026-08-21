@@ -1,6 +1,6 @@
 # Hataori P0 Design
 
-**Status:** Final design consensus
+**Status:** Core implementation-ready; pre-implementation review verdict `Correct-to-merge`
 
 **Scope:** A generic synchronous collective data-parallel engine for MPI ranks and rank-local Rayon execution domains
 
@@ -46,10 +46,10 @@ Hataori uses standard-library collections, synchronization, channels, and errors
 
 #### MPI backend features
 
-`mpi` and `rsmpi-rt` provide the same Hataori API and are mutually exclusive. Enabling both is a compile error.
+`mpi` and `rsmpi-rt` provide the same Hataori API and are mutually exclusive. Enabling both is a compile error. Cargo features are additive, so every crate in one final dependency graph must select the same Hataori MPI backend; adapter crates forward these features rather than choosing a backend internally.
 
-- `mpi` uses the upstream rsmpi crate and its conventional build/link-time system MPI backend.
-- `rsmpi-rt` uses the API-compatible rsmpi v0.8.1 fork with `default-features = false` and only `mpi-rt-sys-backend`. Until a compatible release exists, Hataori pins an exact git revision rather than tracking a branch.
+- `mpi` pins upstream `mpi = "=0.8.1"` with `default-features = false`; its mandatory build/link-time `mpi-sys` backend remains active while `user-operations`, `derive`, and `complex` stay disabled.
+- `rsmpi-rt` uses the API-compatible rsmpi v0.8.1 fork at revision `065cc7622c6ad72b6bcbc808296aaf597ff56b70`, with `default-features = false` and only `mpi-rt-sys-backend`. Moving the pin requires the same compile and multi-rank gates as the initial pin.
 - Hataori does not enable rsmpi's optional `user-operations`, `derive`, or `complex` features. P0 needs only built-in MPI operations and manually encoded protocol headers.
 - A tiny private module aliases the selected crate as the MPI backend. Hataori does not introduce a public transport trait solely to hide two API-compatible implementations.
 
@@ -78,7 +78,7 @@ Core treats input `T`, output `U`, and error `E` as generic values. It has no te
 Tensor integration belongs in an optional adapter that depends on Hataori core, tenferro, and tensor4all:
 
 ```text
-hataori-core
+hataori
     ^
     |
 hataori tensor adapter ---> tenferro
@@ -102,19 +102,46 @@ Neither tenferro nor tensor4all may depend on Hataori types. Hataori core must b
 
 ## 3. Public execution model
 
-The conceptual entry points are:
+The public calls have this argument and return shape; feature-specific implementations apply the exact bounds in Section 12:
 
 ```rust
-map(items, f) -> Result<Vec<U>, MapError>
+pub struct PmapOptions {
+    pub root: Rank,
+    pub batch_size: NonZeroUsize,
+    pub local_mode: LocalMode,
+}
 
-pmap(world, root, root_items, f)
-    -> Result<Option<Vec<U>>, PmapError>
+pub fn map<T, U, E, F>(items: Vec<T>, f: F)
+    -> Result<Vec<U>, MapError>;
+
+#[cfg(feature = "rayon")]
+pub fn map_in<T, U, E, F>(
+    domain: &Domain,
+    mode: LocalMode,
+    items: Vec<T>,
+    f: F,
+) -> Result<Vec<U>, MapError>;
+
+pub fn pmap<C, T, U, E, F>(
+    world: &C,
+    domain: &Domain,
+    options: PmapOptions,
+    root_items: Option<Vec<T>>,
+    f: F,
+) -> Result<Option<Vec<U>>, PmapError>
+where
+    C: Communicator;
 ```
 
-- `map` is local and has no MPI or serialization requirements.
-- `pmap` is collective: all ranks call it in the same order on the same communicator.
-- Only `root` supplies `Some(Vec<T>)`; other ranks supply `None`.
-- Only `root` receives `Some(Vec<U>)` on success.
+Here `Communicator` is the existing trait from the one selected rsmpi crate, not a Hataori transport trait. Core uses only communicator duplication, rank/size, tagged blocking send and exact-source receive, `immediate_probe_with_tag`, signed built-in min reductions, and broadcast. The two mutually exclusive dependencies expose that same rsmpi surface through a private crate alias.
+
+`MapError` records the lowest failing input index and bounded `E::to_string()`. Serial `map` stops at the first callback error. Rayon `Outer` stops admitting new work where Rayon permits, lets already started callbacks finish, and deterministically reports the lowest failed input index; `Sequential` and `Inner` stop after the failing item. `PmapError` is a core enum for preflight, domain, user, wire, and protocol failures and carries the deterministic error key and bounded message where applicable. Tensor/backend integration errors remain in the adapter.
+
+- `map` is local serial execution and has no MPI, Rayon, or serialization requirements. `map_in` is its explicit-domain Rayon counterpart.
+- `pmap` is collective: all ranks call it in the same order on the same communicator. Calling it on different communicators or in a different collective order is a caller contract violation that MPI cannot recover from.
+- `pmap` collectively duplicates `world` once per call and uses only that private communicator for preflight, scheduler traffic, drain, and final convergence. This prevents collision with caller traffic; the duplicate is released only after successful convergence or recoverable-error drain.
+- Only `options.root` supplies `Some(Vec<T>)`; other ranks supply `None`.
+- Only `options.root` receives `Some(Vec<U>)` on success.
 - Each input is evaluated exactly once in successful executions.
 - Results are returned in input order, independent of completion order.
 - `map` is not implemented as world-size-one `pmap`.
@@ -151,16 +178,18 @@ At most one coarse operation is admitted per domain. Admission is nonblocking an
 
 ### 5.1 Hataori-managed mode
 
-Managed mode is the standard P0 mode.
+Managed mode creates and owns one Rayon pool from an explicit CPU set and worker count.
 
-- The builder receives an explicit CPU set and worker count.
-- The CPU set must be a subset of the process's actual allowed CPUs.
-- Hataori creates and owns one Rayon pool.
-- A worker start hook pins each worker to a distinct declared CPU.
-- Pin failure, duplicate assignment, an out-of-range CPU, or too many workers is a construction error.
-- Hataori owns pool shutdown.
+On Linux, managed placement is strict and verified:
 
-Hataori does not infer a second resource policy from global Rayon state, `RAYON_NUM_THREADS`, `from_env`, or automatic topology discovery.
+- the CPU set must be a subset of the process's actual allowed CPUs;
+- a worker start hook pins each worker to a distinct declared CPU;
+- pin failure, duplicate assignment, an out-of-range CPU, or too many workers is a construction error;
+- placement is reported as `Verified`.
+
+On non-Linux targets, P0 uses a documented degraded managed mode: Hataori still creates, owns, and shuts down the pool, but treats the CPU set as a declaration, performs no pinning, and reports placement as `CallerDeclared`. In particular, macOS affinity tags are not CPU binding and Apple Silicon core quality is outside Hataori's contract. Strict affinity assertions run only on Linux; the scheduling, transport, and bounds suites run on every supported target.
+
+Hataori owns pool shutdown and does not infer a second resource policy from global Rayon state, `RAYON_NUM_THREADS`, `from_env`, or automatic topology discovery.
 
 ### 5.2 External-managed mode
 
@@ -175,27 +204,37 @@ The core constructor does not accept a tenferro handle. The optional adapter ass
 
 ## 6. Intra-domain execution modes
 
-When Rayon is enabled, an operation selects one generic fan-out policy:
+`LocalMode` is always defined so `PmapOptions` has one shape across MPI backends. Without Rayon only `Sequential` is accepted; with Rayon an operation selects one generic fan-out policy:
 
 ```rust
 enum LocalMode {
     Sequential,
     Outer,
-    Inner { budget: usize },
+    Inner,
 }
 ```
 
-- `Sequential`: no local fan-out.
+- `Sequential`: no local fan-out; the callback must remain sequential.
 - `Outer`: Hataori maps independent items in the selected domain; each item must not perform another competing fan-out.
-- `Inner { budget }`: Hataori presents items sequentially and gives the item operation exclusive use of up to `budget` workers in the same domain.
+- `Inner`: Hataori presents items sequentially and admits the callback as the sole coarse operation for the domain. The callback may use the domain's full declared `worker_count` through that same pool.
 
-`Inner` is a generic resource contract, not a tenferro-specific mode. Its availability depends only on the core Rayon domain. A tenferro adapter maps it to caller-managed same-pool execution and rejects the integrated operation if that backend capability is unavailable.
+P0 intentionally has no partial inner budget. Rayon cannot cap arbitrary nested same-pool work to fewer than the pool's workers without another scheduling mechanism, and tenferro's motivating contract asks for the complete supplied executor. A future partial budget requires a real backend need and a separately tested mechanism.
 
-`Outer` and `Inner` are mutually exclusive for one operation. `1 <= budget <= worker_count`. Synchronous entry from a foreign pool is rejected.
+`Inner` is a generic core resource contract, not a tenferro-specific variant. The callback still has the ordinary `Fn(T) -> Result<U, E>` shape and obtains no core executor handle. An optional adapter may capture its explicit tenferro/tensor4all context, verify before execution that it belongs to the same domain pool, and then enter tenferro's borrowed same-pool API from the callback. Core neither constructs a second pool nor imports backend types.
+
+`Outer` and `Inner` are mutually exclusive for one operation. Synchronous entry from a foreign pool is rejected before the callback runs.
 
 ## 7. Dynamic P0 scheduler
 
-P0 uses coordinator-driven dynamic scheduling rather than static rank chunks.
+### Collective preflight
+
+A small thread-local RAII guard rejects recursive `pmap` on the MPI initialization thread before any MPI call. Subject to that collective precondition, ranks duplicate the caller communicator and enter one preflight before any `READY`/`TASK` traffic. Preflight checks initialization-thread identity, supported MPI thread level, root and option agreement, exactly one root payload on the designated root, no payload elsewhere, domain identity/mode validity, local domain admission, and that the largest possible deterministic error key is strictly less than the reserved `i64::MAX` no-error sentinel. Error-key overflow or sentinel collision is a typed preflight failure. Locally acquired RAII admission guards remain held through the call. Signed built-in reductions converge any validation failure so every rank either enters the scheduler or returns the same typed error; no rank returns alone while peers enter protocol traffic.
+
+Collective call order, communicator identity, and non-reentrant participation on every rank are API preconditions rather than recoverable preflight checks: ranks that do not enter the same collective call cannot communicate enough to diagnose that misuse.
+
+### Scheduling protocol
+
+P0 uses coordinator-driven dynamic scheduling rather than static rank chunks. It targets coarse items whose compute time is much larger than one `READY` round trip.
 
 ```text
 READY(rank, domain=0)
@@ -209,23 +248,35 @@ READY(rank, domain=0)
 
 - The root owns the queue of indexed items.
 - Batch size is a fixed positive call parameter; the default is 1.
-- Each domain has `running <= 1` and `prefetched = 0`.
-- Every `READY` receives exactly one `TASK` or `STOP`.
+- Each domain, including the root's, has `running <= 1` and `prefetched = 0`.
+- Every remote `READY` receives exactly one `TASK` or `STOP`.
 - `READY` supplies backpressure; P0 has no credit, acknowledgement, heartbeat, retry, cancellation, cost model, or adaptive batch policy.
 - The root restores order with an O(N) indexed result table.
 
-The MPI initialization thread drives all communication. CPU work runs in the rank's execution domain. The coordinator has no dedicated CPU in P0 and makes no communication/computation-overlap guarantee.
+The root retains the input queue and result table, so the input plus all returned payloads must fit in root memory. P0 does not stream results to external storage.
 
-### Future-compatible scheduler seams
+The root rank participates in computation through its own domain. The scheduler assigns it an owned batch directly, without a self-addressed MPI message or serialization. Root-local idleness acts like `READY`, and local completion makes the domain eligible for another batch. This keeps all ranks useful, including world size one, while preserving the same capacity and ordering rules as remote domains.
 
-P0's queue is seeded once and cannot grow after `pmap` starts. Its implementation must nevertheless preserve four small seams for a later controller-driven expanding work queue:
+The MPI initialization thread drives all communication and the root scheduler. With Rayon, root uses `ThreadPool::in_place_scope`: its non-`Send` scope body stays on the calling MPI initialization thread, while `Scope::spawn` sends the borrowed callback task into the root's explicit pool. The task reports completion through a rank-local standard-library channel. This exact primitive, rather than `ThreadPool::scope` or `install`, preserves FUNNELED identity and scoped non-`'static` borrowing.
 
-- quiescence is `pending queue empty && in_flight == 0`, not completion of a counter fixed to the initial input length;
-- every dispatched item has a stable internal task ID independent of its `pmap` result position; fixed-input `pmap` separately maps that ID to the original index;
-- receiving and decoding a result is separate from writing it into `pmap`'s ordered `Vec<U>`;
-- deciding that an empty queue is terminal is separate from sending `STOP`.
+While root-local work is running, the initialization thread checks local completion and services at most one `MPI_Iprobe`-detected message per loop iteration, alternating priority when both remain ready. A detected message is consumed with the ordinary blocking receive path. When neither source is ready, the loop calls `std::thread::yield_now`; P0 adds no progress thread, timer policy, or async runtime. This rule is simple, testable, and prevents either source from starving.
 
-These are internal scheduler boundaries, not new P0 public APIs. P0 may send `STOP` as soon as its immutable queue is empty; a future expanding queue must instead retain an idle worker's outstanding `READY` while other tasks remain in flight, because a later result may generate more work. The worker protocol already supports later task insertion because workers only request work with `READY`; it does not need remote spawn, futures, a task registry, or closure transmission.
+Without Rayon, the existing MPI-only bounds do not require `Send`, so the root executes its local batch synchronously on the initialization thread. MPI progress may pause for at most that batch's callback; after it returns, the root resumes receiving before assigning more work. This preserves scoped non-`Send` execution and eventual rendezvous progress, but does not promise communication progress during an MPI-only root callback.
+
+`MPI_Iprobe` is permitted only for root event multiplexing. P0 data transfer remains blocking: it has no `Isend`, `Irecv`, request lifecycle, prefetch, or background progress. The coordinator has no dedicated CPU in P0.
+
+### Normative domain state transitions
+
+Remote domains follow exactly these transitions:
+
+```text
+Idle -> ReadySent -> Running -> ResultSent -> Idle
+Idle -> ReadySent -> StopReceived -> Drained
+```
+
+A successful or failed batch produces exactly one complete `RESULT` frame, followed by the normal `READY` path. `DRAIN` is sent exactly once, only after `STOP`, callback completion, and completion of every announced send. The root domain follows the same logical states without `READY`, `STOP`, or `DRAIN` MPI messages. A callback panic is not recoverable: under `panic=unwind` the callback boundary catches it only to request `MPI_Abort` from the initialization thread; under `panic=abort` the process terminates directly.
+
+The coordinator is implemented as private pure state transitions over queue, in-flight, result, and rank-state data. Tests drive those transitions directly; P0 adds neither a public nor private generic transport trait. The MPI loop is a thin caller of that state machine.
 
 ## 8. Error and drain protocol
 
@@ -235,25 +286,27 @@ After the first recoverable error:
 2. every current or later `READY` receives `STOP`;
 3. already assigned batches finish or fail;
 4. every announced length and payload is received or drained;
-5. each rank sends `DRAIN` once stopped and idle;
+5. each rank sends `DRAIN` once stopped and idle; root-local work is likewise completed and drained before convergence;
 6. after all ranks drain, one final collective selects the deterministic winning error;
 7. the winning bounded UTF-8 error message is broadcast.
 
-The final winner is selected with a checked packed `u64` and `MPI_UINT64_T`/`MPI_MIN`; an arbitrary Rust struct is never reduced directly. There is no collective after every batch.
+In preflight, a failing rank contributes its rank and a passing rank contributes `world_size`; signed `MPI_INT`/`MPI_MIN` therefore selects the lowest failing rank or `world_size` when all pass. The selected failing rank broadcasts its typed validation error. After scheduling begins, each recoverable error has a canonical tuple `(task_key, class, reporting_rank)`: `task_key` is the stable task ID when one exists and the checked input length for call-level errors, while `class` is a fixed internal ordinal for wire/protocol, user callback, and drain. The key is checked as `((task_key * ERROR_CLASS_COUNT + class) * world_size + reporting_rank)` in the nonnegative range of `i64`; no-error is `i64::MAX`. Final convergence uses `MPI_INT64_T`/`MPI_MIN`, then the encoded reporting rank broadcasts a message capped at 4096 UTF-8 bytes and truncated only at a character boundary. There is no collective after every batch and no custom MPI reduction. P0 deliberately avoids unsigned `MPI_MIN`, which produced incorrect results in [MPICH 4.0.2](https://github.com/pmodels/mpich/issues/6083) and [Open MPI 4.1.4](https://github.com/open-mpi/ompi/issues/10648).
 
-Recoverable errors must not return early and strand a blocking sender. Process death, OOM, `panic=abort`, MPI transport failure, or rank loss may require `MPI_Abort`.
+Recoverable errors must not return early and strand a blocking sender. Process death, OOM, callback panic, MPI transport failure, or rank loss requires `MPI_Abort`; these are not converted into `PmapError`.
 
 Only one high-level `pmap` may be active on an MPI initialization thread. A small RAII reentrancy guard is sufficient; P0 has no communicator registry.
 
 ## 9. MPI thread model
 
-P0 targets `MPI_THREAD_FUNNELED`.
+P0 targets `MPI_THREAD_FUNNELED` behavior.
 
-- Only the thread that initialized MPI may call MPI.
+- MPI-only execution accepts an externally provided `MPI_THREAD_SINGLE` or stronger runtime because no other thread executes during the callback. Hybrid execution requires at least `MPI_THREAD_FUNNELED`. A stronger provided level does not relax Hataori's rules.
+- Only the thread that initialized MPI may call MPI, and externally initialized runtimes are checked with `MPI_Is_thread_main` rather than assumed.
 - Communicators never enter Rayon closures.
 - A mutex does not permit MPI calls from another thread under FUNNELED.
 - Hataori adds no unsafe `Send` or `Sync` implementation for communicators.
-- P0 uses blocking MPI and no background progress thread.
+- P0 transfers data with blocking MPI and has no background progress thread.
+- Root may call `MPI_Iprobe` on that same initialization thread solely to multiplex MPI arrivals with root-local completion.
 
 ## 10. Generic wire and locality
 
@@ -265,7 +318,9 @@ bincode::config::standard()
     .with_little_endian()
 ```
 
-Each envelope includes a protocol version and checked `u64` byte length. Decoding validates the MPI count, integer conversions, protocol version, expected structure, and full byte consumption. Truncation, overflow, and trailing bytes are protocol errors.
+Each message uses a fixed header tag followed, when nonempty, by one payload tag from the same source on the private communicator. The fixed-width header contains protocol version, message kind, batch ID, item count, status, and `u64` payload length. Capacity one means a rank never has two payloads outstanding. Receivers first match the header, then receive exactly its announced payload from that source; no wildcard payload receive is allowed.
+
+`MAX_WIRE_BYTES` is `i32::MAX` for P0, matching rsmpi's MPI `Count`. Length is checked against that limit and local `usize` before allocation or send. Decoding validates the received MPI count, every integer conversion, protocol version, message/state compatibility, expected structure, and full byte consumption. Truncation, overflow, unexpected kind/tag/source, and trailing bytes are protocol errors.
 
 Same-rank movement is an owned move and bypasses serialization and MPI. Distributed `pmap` retains serde bounds because placement is decided at runtime; callers needing non-serializable local work use `map`.
 
@@ -273,13 +328,13 @@ Core transports only opaque serializable `T` and `U` values or bytes. Tensor sha
 
 ## 11. Data placement helpers
 
-P0 provides three synchronous coordinator-only helpers that reuse the same wire and error rules:
+P0 provides three synchronous collective, root-coordinated helpers that reuse the same private-communicator, wire, preflight, and error rules. All ranks call each helper in the same collective order:
 
 - `broadcast`: copy one root-owned value to every rank;
 - `scatter`: distribute rank-local owned shards;
 - `gather`: collect one rank-local owned value from every rank.
 
-Returned values are caller-owned. P0 has no remote registry, cross-call object cache, remote references, or distributed garbage collector.
+Returned values are caller-owned. The root's same-rank contribution is always an owned move and never enters the codec for any helper. P0 has no remote registry, cross-call object cache, remote references, or distributed garbage collector.
 
 ## 12. Trait bounds
 
@@ -287,9 +342,9 @@ P0 uses scoped synchronous execution and does not add `'static` for hypothetical
 
 | Entry point | Bounds |
 |---|---|
-| serial `map` | no serde, `Send`, `Sync`, or `'static` requirement; `E: Display` |
-| Rayon `map` | `T/U/E: Send`; `F: Fn(T) -> Result<U, E> + Send + Sync`; `E: Display`; no `'static` |
-| MPI-only `pmap` | `T/U: Serialize + DeserializeOwned`; `E: Display`; no `Send`, `Sync`, or `'static` |
+| serial `map` | `F: FnMut(T) -> Result<U, E>`; `E: Display`; no serde, `Send`, `Sync`, or `'static` |
+| Rayon `map_in` | `T/U/E: Send`; `F: Fn(T) -> Result<U, E> + Send + Sync`; `E: Display`; no `'static` |
+| MPI-only `pmap` | `T/U: Serialize + DeserializeOwned`; `F: FnMut(T) -> Result<U, E>`; `E: Display`; no `Send`, `Sync`, or `'static` |
 | hybrid `pmap` | MPI bounds plus `T/U/E: Send`; `F: Fn(T) -> Result<U, E> + Send + Sync`; no `'static` |
 
 `E` is moved from a worker and does not require `Sync`. Shared-data APIs add `Sync` only where actual sharing requires it.
@@ -334,11 +389,11 @@ Core rejects before work begins:
 - more than one domain per rank;
 - ambient/global Rayon or hidden pool construction;
 - synchronous foreign-pool entry;
-- invalid or unverifiable managed placement;
+- invalid or unverifiable Linux managed placement;
 - invalid external ownership declarations;
 - worker or background-thread MPI calls;
-- domain admission contention or budget overflow;
-- requests for P0 overlap or dedicated-coordinator behavior.
+- domain admission contention;
+- requests for nonblocking data transfer, prefetch, background progress, or dedicated-coordinator behavior.
 
 The build rejects simultaneous `mpi` and `rsmpi-rt` features.
 
@@ -360,21 +415,26 @@ Backend-specific errors do not enter the core error enum.
 - Empty input, more ranks than inputs, batch size 1, and fixed batch size greater than 1 work.
 - Every successful input executes once and root results preserve input order under reverse completion order.
 - A skewed workload demonstrates meaningful improvement over static contiguous partitioning.
-- Instrumentation proves `running <= 1`, `prefetched = 0`, and bounded resident batches.
-- Large rendezvous-sized results make progress while the root domain also computes.
-- Simultaneous user/decode errors converge on one deterministic winner without deadlock.
-- A communicator is reusable after a recoverable failure.
-- Every MPI call passes `MPI_Is_thread_main`.
-- Same-rank serialization count is zero.
-- Version, length, count, overflow, truncation, and trailing-byte errors are typed.
+- Instrumentation proves `running <= 1`, `prefetched = 0`, bounded resident batches, one complete `RESULT` per assigned batch, and exactly one `STOP`/`DRAIN` transition per remote rank.
+- With Rayon, large rendezvous-sized remote results make progress while the root domain computes; root event polling does not starve local completion.
+- Without Rayon, the root participates synchronously, preserves the MPI-only non-`Send` bounds, and resumes rendezvous progress after each finite local batch.
+- World size one executes every input through the root domain without MPI self-messages or serialization.
+- Simultaneous user/decode errors converge on one deterministic signed-key winner without deadlock; tests cover unsigned values that failed in affected MPI releases.
+- Preflight disagreement or local validation failure causes every rank to return before any scheduler message is sent.
+- A caller communicator is reusable after a recoverable failure, and private-communicator traces contain no unmatched header or payload.
+- A test-only private MPI-call wrapper asserts `MPI_Is_thread_main` at every call site.
+- Hybrid root uses `ThreadPool::in_place_scope`; borrowed callback data remains valid and the coordinator scope body stays on the MPI initialization thread.
+- Same-rank serialization count is zero under an instrumented codec.
+- Version, kind, tag/source, length, count, overflow, truncation, and trailing-byte errors are typed.
 
 ### Domain and affinity
 
-- Managed workers remain on distinct declared CPUs within the launcher/cgroup allowed set.
+- On Linux, managed workers remain on distinct declared CPUs within the launcher/cgroup allowed set and placement reports `Verified`.
+- On non-Linux targets, managed mode performs no pinning and reports `CallerDeclared`; all non-affinity suites still run.
 - External pools are neither re-pinned nor shut down.
 - Global Rayon is never entered.
 - Admission is reacquired after success, error, or unwind.
-- Foreign-pool entry and budget overflow fail before execution.
+- Foreign-pool entry fails before execution.
 
 ### Compile-time boundaries
 
@@ -384,7 +444,7 @@ Backend-specific errors do not enter the core error enum.
 - No communicator or backend receives an unsafe thread-safety wrapper.
 - Core's feature matrix builds without tenferro or tensor4all in its dependency tree.
 - Default and Rayon-only builds contain no MPI, serde, or bincode dependency.
-- `mpi` and `rsmpi-rt` each build the same Hataori MPI API; enabling both fails at compile time.
+- `mpi` and pinned `rsmpi-rt` revision `065cc7622c6ad72b6bcbc808296aaf597ff56b70` each build the same Hataori MPI API; enabling both fails at compile time.
 - An `rsmpi-rt` build succeeds without MPI headers, a C compiler, or libclang, then passes a multi-rank smoke test with `MPI_RT_LIB` set.
 - Hataori can use a caller-supplied communicator without owning MPI initialization/finalization.
 
@@ -406,8 +466,8 @@ Backend-specific errors do not enter the core error enum.
 - Remote object handles, channels, distributed reference counting, or distributed GC
 - Dynamic process creation; ranks are owned by the MPI launcher or scheduler
 - Transmitting Rust closures or executable code
-- Nonblocking communication/computation overlap or background MPI progress
-- `MPI_THREAD_MULTIPLE`
+- Nonblocking data transfer, prefetch, request pipelines, or background MPI progress
+- Using `MPI_THREAD_MULTIPLE` semantics or relaxing Hataori's single-MPI-thread rule
 - Multiple concurrently scheduled domains per rank
 - A dedicated coordinator CPU
 - Automatic topology or NUMA discovery and memory-placement guarantees
@@ -432,42 +492,12 @@ Prototype init-thread `Isend`/`Irecv`/`Test*` with at most one running and one p
 
 Only a detached/overlapped entry that truly requires ownership may add `Send + 'static`; those bounds must not leak into P0 scoped APIs.
 
-### Controller-driven expanding work queue
-
-A separate P1 entry may let the root controller analyze each completed result and enqueue zero or more new tasks:
-
-```text
-seed tasks -> worker result -> root controller analysis -> zero or more new tasks
-```
-
-This extension fits the P0 architecture without replacing its scheduler:
-
-- the root remains the sole queue owner and task producer;
-- generated tasks are owned values of the same task type and use the existing `TASK`/`RESULT` wire path;
-- task IDs are assigned by the controller when tasks are accepted;
-- the existing `READY` protocol schedules both seed and generated tasks;
-- when the queue is temporarily empty but work remains in flight, the root parks outstanding `READY` requests rather than replying `STOP`;
-- termination occurs only when the queue is empty, no task is in flight, and the controller callback has returned without adding work; only then does the root reply `STOP` to parked workers.
-
-Each `READY` still receives exactly one eventual `TASK` or `STOP`; no new worker message is required.
-
-The initial version should use a synchronous root-side result callback. The full result payload must be received and decoded before the callback runs. The callback may update controller-local state and enqueue tasks, but must not call MPI collectives or wait for distributed work. While it runs, FUNNELED MPI progress pauses; this is correct but may reduce utilization for expensive analysis. Moving expensive analysis off the MPI thread or overlapping it with communication is a later optimization and must use the nonblocking-overlap gate rather than complicating the first version.
-
-The callback and worker remain scoped to the enclosing call, so this feature does not by itself require `'static`. It is not arbitrary remote spawn: no closure, function, context, or controller state crosses ranks. A controller callback error follows the existing failure rule: stop accepting and assigning new tasks, drain already dispatched work, and publish one final error.
-
-Before implementation, the API must choose an explicit pending-queue memory policy. It must not silently create an unbounded queue: either configure a maximum and return ownership when enqueue cannot be accepted, or use a demand-driven producer contract. This choice can be made with the first real workload and does not require a P0 placeholder abstraction.
-
-Controller callbacks observe completion order. Task IDs are monotonic in controller acceptance order, but result-dependent task generation is not guaranteed to be reproducible across different completion orders. Applications requiring deterministic expansion must make their controller logic order-independent or explicitly buffer/order completed results.
-
-This capability is independent of remote futures, distributed object handles, task registries, and dynamic process creation. It should be added only when a concrete adaptive or recursive workload provides its API and backpressure requirements.
-
 ### Other P1 candidates
 
+- a controller-driven expanding queue, only after a real workload defines bounded pending-memory and determinism requirements;
 - multiple disjoint domains per rank, after caller-managed backend admission is proven;
 - a dedicated coordinator policy, only if progress latency is measured as a bottleneck;
 - NUMA-aware placement or multithreaded providers, each behind separate correctness and performance evidence.
-
-Future remote execution is not structurally blocked: `(rank, domain_id)` provides addressing and the versioned generic envelope provides transport. If real workloads require it, add one explicit registered-task or scoped remote-call primitive then; do not serialize arbitrary Rust closures or build a distributed object runtime preemptively.
 
 ## 19. Completion definition
 
