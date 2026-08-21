@@ -1,20 +1,49 @@
 use crate::domain::{Domain, LocalMode};
+#[cfg(feature = "rayon")]
+use crate::local::{in_rayon_worker_context, run_in_current_pool, run_in_pool};
 use crate::map::truncate_message;
 use crate::mpi_backend;
 use crate::mpi_backend::collective::SystemOperation;
 use crate::mpi_backend::traits::*;
 use crate::scheduler::{BatchId, Coordinator, Dispatch, ItemResult, SchedulerError};
 use crate::wire::{self, ErrorClass, ErrorKey, Header, MessageKind, MessageStatus};
+#[cfg(feature = "rayon")]
+use rayon::Scope;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroUsize;
+#[cfg(feature = "rayon")]
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
 const HEADER_TAG: i32 = 0;
 const PAYLOAD_TAG: i32 = 1;
 
 type LocalError = (PmapErrorKind, String);
 type RootOutcome<U> = (Vec<U>, i64, Option<LocalError>);
+
+#[cfg(feature = "rayon")]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum RootEvent {
+    Local,
+    Remote,
+    Neither,
+}
+
+#[cfg(feature = "rayon")]
+fn choose_root_event(
+    local_ready: bool,
+    remote_ready: bool,
+    prefer_local: bool,
+) -> (RootEvent, bool) {
+    match (local_ready, remote_ready) {
+        (true, true) if prefer_local => (RootEvent::Local, false),
+        (true, true) => (RootEvent::Remote, true),
+        (true, false) => (RootEvent::Local, prefer_local),
+        (false, true) => (RootEvent::Remote, prefer_local),
+        (false, false) => (RootEvent::Neither, prefer_local),
+    }
+}
 
 /// Options shared by every rank in one collective [`pmap`] call.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -154,6 +183,7 @@ fn receive_header<C: Communicator>(comm: &C, rank: i32) -> Result<Header, PmapEr
     Header::decode(&bytes).map_err(wire_error)
 }
 
+#[cfg(not(feature = "rayon"))]
 fn receive_any_header<C: Communicator>(comm: &C) -> Result<(i32, Header), PmapError> {
     let (bytes, status) = comm.any_process().receive_vec_with_tag::<u8>(HEADER_TAG);
     Header::decode(&bytes)
@@ -216,6 +246,82 @@ struct CallbackFailure {
 enum ResultPayload<U> {
     Values(Vec<(usize, U)>),
     Error(CallbackFailure),
+}
+
+#[cfg(feature = "rayon")]
+enum LocalBatchResult<U> {
+    Values(Vec<ItemResult<U>>),
+    Error(CallbackFailure),
+    Panic,
+}
+
+#[cfg(feature = "rayon")]
+struct LocalBatchOutcome<U> {
+    batch_id: BatchId,
+    result: LocalBatchResult<U>,
+}
+
+#[cfg(feature = "rayon")]
+fn spawn_local_batch<'scope, T, U, E, F>(
+    scope: &Scope<'scope>,
+    mode: LocalMode,
+    batch: crate::scheduler::Batch<T>,
+    f: &'scope F,
+    sender: SyncSender<LocalBatchOutcome<U>>,
+) where
+    T: Send + 'scope,
+    U: Send + 'scope,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    let batch_id = batch.id();
+    let (indices, values): (Vec<_>, Vec<_>) = batch
+        .into_items()
+        .into_iter()
+        .map(|item| (item.original_index(), item.into_value()))
+        .unzip();
+    scope.spawn(move |_| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_in_current_pool(mode, values, f)
+        }));
+        let result = match result {
+            Ok(Ok(values)) => LocalBatchResult::Values(
+                indices
+                    .into_iter()
+                    .zip(values)
+                    .map(|(index, value)| ItemResult::new(index, value))
+                    .collect(),
+            ),
+            Ok(Err(error)) => LocalBatchResult::Error(CallbackFailure {
+                index: indices[error.index()],
+                kind: PmapErrorKind::User.code(),
+                message: error.message().to_owned(),
+            }),
+            Err(_) => LocalBatchResult::Panic,
+        };
+        let _ = sender.send(LocalBatchOutcome { batch_id, result });
+    });
+}
+
+#[cfg(feature = "rayon")]
+fn spawn_root_batch<'scope, T, U, E, F>(
+    scope: &Scope<'scope>,
+    scheduler: &mut Coordinator<T, U>,
+    mode: LocalMode,
+    f: &'scope F,
+) -> Result<Option<Receiver<LocalBatchOutcome<U>>>, PmapError>
+where
+    T: Send + 'scope,
+    U: Send + 'scope,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    let Some(batch) = scheduler.next_root_batch().map_err(scheduler_error)? else {
+        return Ok(None);
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    spawn_local_batch(scope, mode, batch, f, sender);
+    Ok(Some(receiver))
 }
 
 fn error_key(
@@ -298,7 +404,7 @@ fn preflight<C, T>(
     comm: &C,
     options: &PmapOptions,
     root_items: Option<&Vec<T>>,
-    domain_admitted: bool,
+    execution_valid: bool,
 ) -> Result<(), PmapError>
 where
     C: Communicator,
@@ -328,9 +434,8 @@ where
     let local_valid = is_thread_main()
         && options.root >= 0
         && options.root < size
-        && options.local_mode == LocalMode::Sequential
         && ((rank == options.root) == root_items.is_some())
-        && domain_admitted
+        && execution_valid
         && min_root == max_root
         && min_batch == max_batch
         && min_mode == max_mode;
@@ -346,6 +451,7 @@ where
     Ok(())
 }
 
+#[cfg(not(feature = "rayon"))]
 fn worker_loop<C, T, U, E, F>(
     comm: &C,
     root: i32,
@@ -445,6 +551,115 @@ where
     }
 }
 
+#[cfg(feature = "rayon")]
+fn hybrid_worker_loop<C, T, U, E, F>(
+    comm: &C,
+    root: i32,
+    mode: LocalMode,
+    pool: &rayon::ThreadPool,
+    f: F,
+) -> Result<(i64, Option<LocalError>), PmapError>
+where
+    C: Communicator,
+    T: Serialize + DeserializeOwned + Send,
+    U: Serialize + DeserializeOwned + Send,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    let rank = comm.rank();
+    let size = comm.size();
+    let mut local_key = ErrorKey::NO_ERROR_KEY;
+    let mut local_error = None;
+
+    loop {
+        send_empty(comm, root, MessageKind::Ready, 0)?;
+        let value = receive_header(comm, root)?;
+        match value.kind() {
+            MessageKind::Task => {
+                let items: Vec<(usize, T)> = match receive_payload(comm, root, value) {
+                    Ok(items) => items,
+                    Err(error) => {
+                        let index = usize::try_from(value.item_count()).unwrap_or(usize::MAX);
+                        let key = error_key(index, ErrorClass::WireProtocol, rank, size)?;
+                        local_key = local_key.min(key);
+                        local_error = Some((PmapErrorKind::Wire, error.message().to_owned()));
+                        let failure = CallbackFailure {
+                            index,
+                            kind: PmapErrorKind::Wire.code(),
+                            message: error.message().to_owned(),
+                        };
+                        send_frame(
+                            comm,
+                            root,
+                            MessageKind::Result,
+                            MessageStatus::Error,
+                            value.batch_id(),
+                            1,
+                            &ResultPayload::<U>::Error(failure),
+                        )?;
+                        continue;
+                    }
+                };
+                let (indices, values): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_in_pool(pool, mode, values, &f)
+                }));
+                let result = match outcome {
+                    Ok(Ok(values)) => {
+                        ResultPayload::Values(indices.into_iter().zip(values).collect())
+                    }
+                    Ok(Err(error)) => {
+                        let index = indices[error.index()];
+                        let failure = CallbackFailure {
+                            index,
+                            kind: PmapErrorKind::User.code(),
+                            message: error.message().to_owned(),
+                        };
+                        let key = error_key(index, ErrorClass::Callback, rank, size)?;
+                        local_key = local_key.min(key);
+                        local_error = Some((PmapErrorKind::User, failure.message.clone()));
+                        ResultPayload::Error(failure)
+                    }
+                    Err(_) => comm.abort(71),
+                };
+                match result {
+                    ResultPayload::Values(values) => {
+                        let item_count = values.len();
+                        let payload = ResultPayload::Values(values);
+                        send_frame(
+                            comm,
+                            root,
+                            MessageKind::Result,
+                            MessageStatus::Ok,
+                            value.batch_id(),
+                            item_count,
+                            &payload,
+                        )?;
+                    }
+                    ResultPayload::Error(failure) => {
+                        let payload = ResultPayload::<U>::Error(failure);
+                        send_frame(
+                            comm,
+                            root,
+                            MessageKind::Result,
+                            MessageStatus::Error,
+                            value.batch_id(),
+                            value.item_count() as usize,
+                            &payload,
+                        )?;
+                    }
+                }
+            }
+            MessageKind::Stop => {
+                send_empty(comm, root, MessageKind::Drain, 0)?;
+                return Ok((local_key, local_error));
+            }
+            _ => return Err(protocol_error("worker received an unexpected message")),
+        }
+    }
+}
+
+#[cfg(not(feature = "rayon"))]
 fn execute_root_batch<C, T, U, E, F>(
     comm: &C,
     scheduler: &mut Coordinator<T, U>,
@@ -494,6 +709,108 @@ where
     Ok(true)
 }
 
+struct RootErrorState<'a> {
+    call_task_key: usize,
+    rank: i32,
+    size: i32,
+    local_key: &'a mut i64,
+    local_error: &'a mut Option<LocalError>,
+}
+
+fn process_remote_header<C, T, U>(
+    comm: &C,
+    scheduler: &mut Coordinator<T, U>,
+    source: i32,
+    value: Header,
+    errors: &mut RootErrorState<'_>,
+) -> Result<(), PmapError>
+where
+    C: Communicator,
+    T: Serialize + DeserializeOwned,
+    U: Serialize + DeserializeOwned,
+{
+    let call_task_key = errors.call_task_key;
+    let rank = errors.rank;
+    let size = errors.size;
+    let local_key = &mut *errors.local_key;
+    let local_error = &mut *errors.local_error;
+    match value.kind() {
+        MessageKind::Ready => match scheduler.on_remote_ready(source).map_err(scheduler_error)? {
+            Dispatch::Task(batch) => {
+                let batch_id = batch.id();
+                let items: Vec<(usize, T)> = batch
+                    .into_items()
+                    .into_iter()
+                    .map(|item| (item.original_index(), item.into_value()))
+                    .collect();
+                send_frame(
+                    comm,
+                    source,
+                    MessageKind::Task,
+                    MessageStatus::None,
+                    batch_id.get(),
+                    items.len(),
+                    &items,
+                )?;
+            }
+            Dispatch::Stop => send_empty(comm, source, MessageKind::Stop, 0)?,
+        },
+        MessageKind::Result => {
+            let payload: ResultPayload<U> = match receive_payload(comm, source, value) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
+                    *local_key = (*local_key).min(key);
+                    *local_error = Some((error.kind(), error.message().to_owned()));
+                    scheduler
+                        .on_remote_protocol_error(source)
+                        .map_err(scheduler_error)?;
+                    return Ok(());
+                }
+            };
+            match (value.status(), payload) {
+                (MessageStatus::Ok, ResultPayload::Values(values)) => {
+                    let results = values
+                        .into_iter()
+                        .map(|(index, result)| ItemResult::new(index, result))
+                        .collect();
+                    scheduler
+                        .on_remote_success(source, BatchId::from_raw(value.batch_id()), results)
+                        .map_err(scheduler_error)?;
+                }
+                (MessageStatus::Error, ResultPayload::Error(_failure)) => {
+                    scheduler
+                        .on_remote_error(source, BatchId::from_raw(value.batch_id()))
+                        .map_err(scheduler_error)?;
+                }
+                _ => {
+                    let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
+                    *local_key = (*local_key).min(key);
+                    *local_error =
+                        Some((PmapErrorKind::Protocol, "invalid result status".to_owned()));
+                    scheduler
+                        .on_remote_protocol_error(source)
+                        .map_err(scheduler_error)?;
+                }
+            }
+        }
+        MessageKind::Drain => scheduler.on_remote_drain(source).map_err(scheduler_error)?,
+        _ => {
+            let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
+            *local_key = (*local_key).min(key);
+            *local_error = Some((
+                PmapErrorKind::Protocol,
+                "unexpected message from worker".to_owned(),
+            ));
+            scheduler
+                .on_remote_protocol_error(source)
+                .map_err(scheduler_error)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "rayon"))]
 fn root_loop<C, T, U, E, F>(
     comm: &C,
     options: &PmapOptions,
@@ -538,83 +855,19 @@ where
         }
 
         let (source, value) = receive_any_header(comm)?;
-        match value.kind() {
-            MessageKind::Ready => {
-                match scheduler.on_remote_ready(source).map_err(scheduler_error)? {
-                    Dispatch::Task(batch) => {
-                        let batch_id = batch.id();
-                        let items: Vec<(usize, T)> = batch
-                            .into_items()
-                            .into_iter()
-                            .map(|item| (item.original_index(), item.into_value()))
-                            .collect();
-                        send_frame(
-                            comm,
-                            source,
-                            MessageKind::Task,
-                            MessageStatus::None,
-                            batch_id.get(),
-                            items.len(),
-                            &items,
-                        )?;
-                    }
-                    Dispatch::Stop => send_empty(comm, source, MessageKind::Stop, 0)?,
-                }
-            }
-            MessageKind::Result => {
-                let payload: ResultPayload<U> = match receive_payload(comm, source, value) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
-                        local_key = local_key.min(key);
-                        local_error = Some((error.kind(), error.message().to_owned()));
-                        scheduler
-                            .on_remote_protocol_error(source)
-                            .map_err(scheduler_error)?;
-                        continue;
-                    }
-                };
-                match (value.status(), payload) {
-                    (MessageStatus::Ok, ResultPayload::Values(values)) => {
-                        let results = values
-                            .into_iter()
-                            .map(|(index, result)| ItemResult::new(index, result))
-                            .collect();
-                        scheduler
-                            .on_remote_success(source, BatchId::from_raw(value.batch_id()), results)
-                            .map_err(scheduler_error)?;
-                    }
-                    (MessageStatus::Error, ResultPayload::Error(_failure)) => {
-                        scheduler
-                            .on_remote_error(source, BatchId::from_raw(value.batch_id()))
-                            .map_err(scheduler_error)?;
-                    }
-                    _ => {
-                        let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
-                        local_key = local_key.min(key);
-                        local_error =
-                            Some((PmapErrorKind::Protocol, "invalid result status".to_owned()));
-                        scheduler
-                            .on_remote_protocol_error(source)
-                            .map_err(scheduler_error)?;
-                    }
-                }
-            }
-            MessageKind::Drain => {
-                scheduler.on_remote_drain(source).map_err(scheduler_error)?;
-            }
-            _ => {
-                let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
-                local_key = local_key.min(key);
-                local_error = Some((
-                    PmapErrorKind::Protocol,
-                    "unexpected message from worker".to_owned(),
-                ));
-                scheduler
-                    .on_remote_protocol_error(source)
-                    .map_err(scheduler_error)?;
-            }
-        }
+        process_remote_header(
+            comm,
+            &mut scheduler,
+            source,
+            value,
+            &mut RootErrorState {
+                call_task_key,
+                rank,
+                size,
+                local_key: &mut local_key,
+                local_error: &mut local_error,
+            },
+        )?;
 
         if !scheduler.is_finished() {
             let _ = execute_root_batch(
@@ -635,6 +888,124 @@ where
         scheduler.into_results().map_err(scheduler_error)?
     };
     Ok((results, local_key, local_error))
+}
+
+#[cfg(feature = "rayon")]
+fn hybrid_root_loop<C, T, U, E, F>(
+    comm: &C,
+    options: &PmapOptions,
+    root_items: Vec<T>,
+    pool: &rayon::ThreadPool,
+    f: &F,
+) -> Result<RootOutcome<U>, PmapError>
+where
+    C: Communicator,
+    T: Serialize + DeserializeOwned + Send,
+    U: Serialize + DeserializeOwned + Send,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    let root = options.root;
+    let rank = comm.rank();
+    let size = comm.size();
+    let remotes: Vec<i32> = (0..size).filter(|candidate| *candidate != root).collect();
+    let call_task_key = root_items.len();
+    let mut scheduler = Coordinator::<T, U>::new(root, remotes, root_items, options.batch_size)
+        .map_err(scheduler_error)?;
+    let mut local_key = ErrorKey::NO_ERROR_KEY;
+    let mut local_error = None;
+
+    pool.in_place_scope(|scope| {
+        let mut receiver: Option<Receiver<LocalBatchOutcome<U>>> = None;
+        let mut pending_local: Option<LocalBatchOutcome<U>> = None;
+        let mut prefer_local = true;
+
+        loop {
+            if receiver.is_none() {
+                receiver =
+                    spawn_root_batch::<T, U, E, F>(scope, &mut scheduler, options.local_mode, f)?;
+            }
+            if receiver.is_none() && scheduler.is_finished() && scheduler.is_quiescent() {
+                break;
+            }
+
+            let mut local_disconnected = false;
+            if pending_local.is_none() {
+                if let Some(local) = receiver.as_ref() {
+                    match local.try_recv() {
+                        Ok(outcome) => pending_local = Some(outcome),
+                        Err(TryRecvError::Empty) => {}
+                        Err(TryRecvError::Disconnected) => local_disconnected = true,
+                    }
+                }
+            }
+            let remote_source = if size > 1 {
+                comm.any_process()
+                    .immediate_probe_with_tag(HEADER_TAG)
+                    .map(|status| status.source_rank())
+            } else {
+                None
+            };
+            let local_ready = pending_local.is_some() || local_disconnected;
+            let (event, next_preference) =
+                choose_root_event(local_ready, remote_source.is_some(), prefer_local);
+            prefer_local = next_preference;
+
+            match event {
+                RootEvent::Local => {
+                    if local_disconnected {
+                        comm.abort(70);
+                    }
+                    let outcome = pending_local
+                        .take()
+                        .ok_or_else(|| protocol_error("missing root-local outcome"))?;
+                    receiver = None;
+                    match outcome.result {
+                        LocalBatchResult::Values(values) => {
+                            scheduler
+                                .on_root_success(outcome.batch_id, values)
+                                .map_err(scheduler_error)?;
+                        }
+                        LocalBatchResult::Error(failure) => {
+                            let key = error_key(failure.index, ErrorClass::Callback, rank, size)?;
+                            local_key = local_key.min(key);
+                            local_error = Some((PmapErrorKind::User, failure.message.clone()));
+                            scheduler
+                                .on_root_error(outcome.batch_id)
+                                .map_err(scheduler_error)?;
+                        }
+                        LocalBatchResult::Panic => comm.abort(70),
+                    }
+                }
+                RootEvent::Remote => {
+                    let source = remote_source
+                        .ok_or_else(|| protocol_error("missing probed remote source"))?;
+                    let value = receive_header(comm, source)?;
+                    process_remote_header(
+                        comm,
+                        &mut scheduler,
+                        source,
+                        value,
+                        &mut RootErrorState {
+                            call_task_key,
+                            rank,
+                            size,
+                            local_key: &mut local_key,
+                            local_error: &mut local_error,
+                        },
+                    )?;
+                }
+                RootEvent::Neither => std::thread::yield_now(),
+            }
+        }
+
+        let results = if scheduler.failed() {
+            Vec::new()
+        } else {
+            scheduler.into_results().map_err(scheduler_error)?
+        };
+        Ok((results, local_key, local_error))
+    })
 }
 
 impl PmapErrorKind {
@@ -670,6 +1041,7 @@ impl PmapErrorKind {
 ///
 /// This MPI-only entry is synchronous and adds no `Send`, `Sync`, or `'static`
 /// bounds to the callback or values.
+#[cfg(not(feature = "rayon"))]
 pub fn pmap<C, T, U, E, F>(
     world: &C,
     domain: &Domain,
@@ -691,7 +1063,10 @@ where
         &comm,
         &options,
         root_items.as_ref(),
-        admission.is_ok() && domain.id().get() == 0 && domain.worker_count() == 1,
+        admission.is_ok()
+            && domain.id().get() == 0
+            && domain.worker_count() == 1
+            && options.local_mode == LocalMode::Sequential,
     )?;
     let _admission = admission.expect("successful preflight guarantees domain admission");
 
@@ -715,5 +1090,123 @@ where
         Some((kind, message)) => Err(PmapError::keyed(kind, selected, message)),
         None if rank == options.root => Ok(Some(results)),
         None => Ok(None),
+    }
+}
+
+/// Dynamically maps root-owned items across MPI ranks and each rank's explicit
+/// Rayon domain.
+///
+/// Every rank must call this collective in the same order with identical
+/// options. Only `options.root` supplies items and receives ordered results.
+/// The call must originate on the MPI initialization/main thread outside every
+/// Rayon worker, and MPI must provide `MPI_THREAD_FUNNELED` or stronger.
+/// Callback state may borrow non-`'static` data while satisfying the stated
+/// Rayon `Send`/`Sync` bounds; values retain the serialization bounds required
+/// by remote execution. All MPI calls remain on the calling thread.
+#[cfg(feature = "rayon")]
+pub fn pmap<C, T, U, E, F>(
+    world: &C,
+    domain: &Domain,
+    options: PmapOptions,
+    root_items: Option<Vec<T>>,
+    f: F,
+) -> Result<Option<Vec<U>>, PmapError>
+where
+    C: Communicator,
+    T: Serialize + DeserializeOwned + Send,
+    U: Serialize + DeserializeOwned + Send,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    if in_rayon_worker_context() {
+        return Err(PmapError::new(
+            PmapErrorKind::Preflight,
+            "hybrid pmap cannot enter from a Rayon worker",
+        ));
+    }
+    let _active = Active::acquire()?;
+    let admission = domain.try_admit();
+    let pool = domain.rayon_pool().cloned();
+    let execution_valid = admission.is_ok()
+        && pool.is_some()
+        && domain.id().get() == 0
+        && rayon::current_thread_index().is_none()
+        && mpi_backend::environment::threading_support()
+            >= mpi_backend::environment::Threading::Funneled;
+    let comm = world.duplicate();
+    preflight(&comm, &options, root_items.as_ref(), execution_valid)?;
+    let _admission = admission.expect("successful preflight guarantees domain admission");
+    let pool = pool.expect("successful preflight guarantees a Rayon pool");
+
+    let rank = comm.rank();
+    let outcome = if rank == options.root {
+        hybrid_root_loop::<_, T, U, E, F>(
+            &comm,
+            &options,
+            root_items.expect("successful preflight guarantees root input"),
+            pool.as_ref(),
+            &f,
+        )
+    } else {
+        hybrid_worker_loop(&comm, options.root, options.local_mode, pool.as_ref(), f)
+            .map(|(key, error)| (Vec::new(), key, error))
+    };
+    let (results, local_key, local_error) = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => comm.abort(72),
+    };
+
+    let selected = convergence(&comm, local_key);
+    let error = match broadcast_error(&comm, selected, local_key, local_error) {
+        Ok(error) => error,
+        Err(_) => comm.abort(73),
+    };
+    match error {
+        Some((kind, message)) => Err(PmapError::keyed(kind, selected, message)),
+        None if rank == options.root => Ok(Some(results)),
+        None => Ok(None),
+    }
+}
+
+#[cfg(all(test, feature = "rayon"))]
+mod tests {
+    #[test]
+    fn root_event_chooser_alternates_when_both_sources_are_ready() {
+        let mut prefer_local = true;
+        let mut events = Vec::new();
+        for _ in 0..4 {
+            let (event, next) = super::choose_root_event(true, true, prefer_local);
+            events.push(event);
+            prefer_local = next;
+        }
+        assert_eq!(
+            events,
+            [
+                super::RootEvent::Local,
+                super::RootEvent::Remote,
+                super::RootEvent::Local,
+                super::RootEvent::Remote
+            ]
+        );
+    }
+
+    #[test]
+    fn disconnected_local_sender_is_selected_for_abort() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<()>(1);
+        drop(sender);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
+        let (event, _) = super::choose_root_event(true, false, false);
+        assert_eq!(event, super::RootEvent::Local);
+    }
+
+    #[test]
+    fn root_event_chooser_keeps_one_sided_progress() {
+        let (local, turn) = super::choose_root_event(true, false, true);
+        assert_eq!(local, super::RootEvent::Local);
+        let (remote, _) = super::choose_root_event(false, true, turn);
+        assert_eq!(remote, super::RootEvent::Remote);
     }
 }

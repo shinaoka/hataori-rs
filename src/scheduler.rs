@@ -1,8 +1,3 @@
-#![cfg_attr(
-    feature = "rayon",
-    allow(dead_code, reason = "Task #17 consumes scheduler state in hybrid pmap")
-)]
-
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;

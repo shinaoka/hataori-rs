@@ -1,8 +1,3 @@
-#![cfg_attr(
-    feature = "rayon",
-    allow(dead_code, reason = "Task #17 consumes wire primitives in hybrid pmap")
-)]
-
 use crate::map::truncate_message;
 use bincode::config::{self, Configuration};
 use serde::{de::DeserializeOwned, Serialize};

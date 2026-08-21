@@ -180,3 +180,21 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; bounded retry after tool timeout)
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
+
+### Task #17 — hybrid `pmap` and root compute
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; bounded retry after initial tool timeout)
+- Pre-implementation Round 1 verdict: **Changes requested**
+- Required design fixes: make root panic/channel-disconnect directions explicit; pin scope join-before-return/unwind for borrowed jobs; reject entry from every Rayon worker including the selected pool; state provided-thread-level and no-worker-MPI rules; make trace evidence, not payload-size timing, prove rendezvous progress.
+- Fixes applied: capacity-one outcome protocol and abort ownership are normative; Rayon joins scoped jobs before return/unwind; hybrid entry requires the MPI main/initialization thread outside all pools; provided `FUNNELED` or stronger is accepted while `SINGLE` is rejected; the ≥1 MiB fixture uses a private serviced-header-before-local-completion trace plus payload integrity and a whole-group watchdog.
+- Follow-up pre-implementation verdict: **Correct-to-merge**
+- During implementation, FUNNELED analysis exposed that a Rayon-worker rank cannot safely join an MPI preflight merely to report its invalid context. Implementation stopped and the design gate was reopened.
+- Corrected pre-implementation rounds: **Changes requested** until the portable boundary was exact. The final contract locally rejects exactly `rayon::current_thread_index() == Some` before any state/MPI call, documents rank disagreement as collective caller misuse, and empirically pins plain/custom/global worker, `install`, `scope`, and `in_place_scope` contexts in a Rayon-only guard test.
+- Corrected pre-implementation final verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable; two bounded continuation timeouts), with parent completion of the event loop, fairness buffering fix, integration examples, and watchdog gates.
+- Scope: shared admitted local-mode kernel; hybrid worker execution; root `in_place_scope` coordinator with capacity-one outcome channel; alternating local/`MPI_Iprobe` event selection; both MPI backends; world-size-one/error/reuse/rendezvous/panic watchdog coverage.
+- Integration correction: a completed local outcome is retained when fairness selects a simultaneously ready remote event; it is never consumed and dropped before its turn.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; evidence-preserving bounded retry after repository-tool timeouts)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Reviewer-requested hardening: added a focused disconnected-local-sender test proving the chooser selects the abort path immediately.

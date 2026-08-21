@@ -1,11 +1,15 @@
+#[cfg(feature = "rayon")]
+use mpi_runtime as mpi_api;
+#[cfg(feature = "rayon")]
+#[path = "support/hybrid_smoke.rs"]
+mod hybrid_smoke;
+
 #[cfg(not(feature = "rayon"))]
 use hataori::{pmap, Domain, LocalMode, PmapErrorKind, PmapOptions};
 #[cfg(not(feature = "rayon"))]
 use mpi_runtime::traits::*;
 #[cfg(not(feature = "rayon"))]
 use std::num::NonZeroUsize;
-#[cfg(not(feature = "rayon"))]
-use std::path::Path;
 
 #[cfg(not(feature = "rayon"))]
 fn options(batch_size: usize) -> PmapOptions {
@@ -17,14 +21,25 @@ fn options(batch_size: usize) -> PmapOptions {
 }
 
 #[cfg(feature = "rayon")]
-fn main() {}
+fn main() {
+    use mpi_runtime::environment::Threading;
+    use std::path::Path;
+
+    let library =
+        std::env::var("MPI_RT_LIB").expect("MPI_RT_LIB must be set before MPI initialization");
+    assert!(Path::new(&library).is_absolute());
+    let (universe, provided) = mpi_runtime::initialize_with_threading(Threading::Funneled)
+        .expect("MPI must not already be initialized or finalized");
+    assert!(provided >= Threading::Funneled);
+    hybrid_smoke::run(&universe.world());
+}
 
 #[cfg(not(feature = "rayon"))]
 fn main() {
     let mpi_rt_lib =
         std::env::var("MPI_RT_LIB").expect("MPI_RT_LIB must be set before MPI initialization");
     assert!(
-        Path::new(&mpi_rt_lib).is_absolute(),
+        std::path::Path::new(&mpi_rt_lib).is_absolute(),
         "MPI_RT_LIB must be an absolute path"
     );
     println!("MPI_RT_LIB={mpi_rt_lib}");

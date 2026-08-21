@@ -258,7 +258,9 @@ The root retains the input queue and result table, so the input plus all returne
 
 The root rank participates in computation through its own domain. The scheduler assigns it an owned batch directly, without a self-addressed MPI message or serialization. Root-local idleness acts like `READY`, and local completion makes the domain eligible for another batch. Calling the root-dispatch transition while its lane is running is a typed protocol error and leaves state unchanged; only an idle root with no assignable work becomes stopped. This keeps all ranks useful, including world size one, while preserving the same capacity and ordering rules as remote domains.
 
-The MPI initialization thread drives all communication and the root scheduler. With Rayon, root uses `ThreadPool::in_place_scope`: its non-`Send` scope body stays on the calling MPI initialization thread, while `Scope::spawn` sends the borrowed callback task into the root's explicit pool. The task reports completion through a rank-local standard-library channel. This exact primitive, rather than `ThreadPool::scope` or `install`, preserves FUNNELED identity and scoped non-`'static` borrowing.
+The MPI initialization thread drives all communication and the root scheduler. With Rayon, root uses `ThreadPool::in_place_scope`: its non-`Send` scope body stays on the calling MPI initialization thread, while `Scope::spawn` sends the borrowed callback task into the root's explicit pool. The task reports completion through a rank-local capacity-one standard-library channel. This exact primitive, rather than `ThreadPool::scope` or `install`, preserves FUNNELED identity and scoped non-`'static` borrowing. Rayon joins every scoped job before `in_place_scope` returns or propagates an unwind, so no borrowed caller frame can be destroyed while a root job remains live. Hataori reaches its MPI-abort branches from the scope body without unwinding that borrowed frame.
+
+The spawned root closure catches callback panics and sends one `Panic` outcome; the scope body on the MPI initialization thread receives that outcome and calls `MPI_Abort`. A failed closure-side send only means the receiver has already been dropped and must not trigger a second panic. Conversely, a disconnected receiver with no outcome means the sender terminated unexpectedly, so the scope body calls `MPI_Abort`. No pool worker calls MPI on either path.
 
 While root-local work is running, the initialization thread checks local completion and services at most one `MPI_Iprobe`-detected message per loop iteration, alternating priority when both remain ready. A detected message is consumed with the ordinary blocking receive path. When neither source is ready, the loop calls `std::thread::yield_now`; P0 adds no progress thread, timer policy, or async runtime. This rule is simple, testable, and prevents either source from starving.
 
@@ -301,7 +303,8 @@ Only one high-level `pmap` may be active on an MPI initialization thread. A smal
 
 P0 targets `MPI_THREAD_FUNNELED` behavior.
 
-- MPI-only execution accepts an externally provided `MPI_THREAD_SINGLE` or stronger runtime because no other thread executes during the callback. Hybrid execution requires at least `MPI_THREAD_FUNNELED`. A stronger provided level does not relax Hataori's rules.
+- MPI-only execution accepts an externally provided `MPI_THREAD_SINGLE` or stronger runtime because no other thread executes during the callback. Hybrid execution rejects `MPI_THREAD_SINGLE` and accepts `MPI_THREAD_FUNNELED`, `MPI_THREAD_SERIALIZED`, or `MPI_THREAD_MULTIPLE`. A stronger provided level does not relax Hataori's rules.
+- Every rank must enter hybrid `pmap` on the MPI initialization/main thread and not on a Rayon pool worker. P0’s portable local guard rejects exactly contexts for which `rayon::current_thread_index()` is `Some`; Rayon exposes no general public marker for a scope body that remains on an ordinary calling thread. A `ThreadPool::in_place_scope` body that stays on the MPI main thread and reports `None` is allowed. On the pinned Rayon version, `ThreadPool::install`, `ThreadPool::scope`, and `rayon::scope` bodies report `Some` and are rejected. Hataori does not own MPI initialization and cannot capture a stronger private initialization-thread token without changing the integration contract. The pure helper is available in Rayon-only builds and is the first statement on every hybrid `pmap` entry, including re-entry. A failed guard returns locally before Active/domain admission/thread-level queries/`MPI_Is_thread_main`/communicator duplication or any MPI call; it deliberately does not join collective preflight because doing so from a worker would violate `FUNNELED`. Ranks that disagree about this entry precondition are caller misuse, like missing collective participation, and may strand peers. Once the guard passes, local thread-level and main-thread query results, pool/domain state, options, and root-input shape are folded through collective preflight. The initialization thread remains outside the selected pool so a one-worker pool cannot deadlock while the coordinator waits for a spawned root job.
 - Only the thread that initialized MPI may call MPI, and externally initialized runtimes are checked with `MPI_Is_thread_main` rather than assumed.
 - Communicators never enter Rayon closures.
 - A mutex does not permit MPI calls from another thread under FUNNELED.
@@ -418,7 +421,7 @@ Backend-specific errors do not enter the core error enum.
 - Every successful input executes once and root results preserve input order under reverse completion order.
 - A skewed workload demonstrates meaningful improvement over static contiguous partitioning.
 - Instrumentation proves `running <= 1`, `prefetched = 0`, bounded resident batches, one complete `RESULT` per assigned batch, and exactly one `STOP`/`DRAIN` transition per remote rank.
-- With Rayon, large rendezvous-sized remote results make progress while the root domain computes; root event polling does not starve local completion.
+- With Rayon, remote result payloads of at least 1 MiB make progress while the root domain computes; the watchdog fixture also records that a remote header was serviced before local completion, rather than inferring rendezvous progress from timing alone. Root event polling does not starve local completion.
 - Without Rayon, the root participates synchronously, preserves the MPI-only non-`Send` bounds, and resumes rendezvous progress after each finite local batch.
 - World size one executes every input through the root domain without MPI self-messages or serialization.
 - Simultaneous user/decode errors converge on one deterministic signed-key winner without deadlock; tests cover unsigned values that failed in affected MPI releases.
@@ -436,7 +439,7 @@ Backend-specific errors do not enter the core error enum.
 - External pools are neither re-pinned nor shut down.
 - Global Rayon is never entered.
 - Admission is reacquired after success, error, or unwind.
-- Foreign-pool entry fails before execution.
+- Entry from every context where `rayon::current_thread_index()` is `Some` fails locally before the first MPI call. An MPI-free guard matrix in the Rayon-only build records the actual predicate for plain main/ordinary threads, global/custom workers, `ThreadPool::install`, `ThreadPool::scope`, `ThreadPool::in_place_scope`, and `rayon::scope` on the pinned Rayon version; only `Some` cases are rejection cases.
 
 ### Compile-time boundaries
 

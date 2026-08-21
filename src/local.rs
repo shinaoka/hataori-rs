@@ -49,6 +49,45 @@ impl From<MapError> for MapInError {
     }
 }
 
+pub(crate) fn in_rayon_worker_context() -> bool {
+    rayon::current_thread_index().is_some()
+}
+
+pub(crate) fn run_in_current_pool<T, U, E, F>(
+    mode: LocalMode,
+    items: Vec<T>,
+    f: &F,
+) -> Result<Vec<U>, MapError>
+where
+    T: Send,
+    U: Send,
+    E: fmt::Display + Send,
+    F: Fn(T) -> Result<U, E> + Sync,
+{
+    match mode {
+        LocalMode::Sequential | LocalMode::Inner => map(items, f),
+        LocalMode::Outer => {
+            let results: Vec<Result<U, E>> = items.into_par_iter().map(f).collect();
+            map(results, |result| result)
+        }
+    }
+}
+
+pub(crate) fn run_in_pool<T, U, E, F>(
+    pool: &rayon::ThreadPool,
+    mode: LocalMode,
+    items: Vec<T>,
+    f: F,
+) -> Result<Vec<U>, MapError>
+where
+    T: Send,
+    U: Send,
+    E: fmt::Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    pool.install(|| run_in_current_pool(mode, items, &f))
+}
+
 /// Maps `items` through an explicit Rayon domain.
 ///
 /// The target domain must have a pool, the call must not originate in another
@@ -93,27 +132,17 @@ where
     F: Fn(T) -> Result<U, E> + Send + Sync,
 {
     let pool = domain.rayon_pool().ok_or(MapInError::MissingPool)?;
-    if rayon::current_thread_index().is_some() && pool.current_thread_index().is_none() {
+    if in_rayon_worker_context() && pool.current_thread_index().is_none() {
         return Err(MapInError::ForeignPool);
     }
     let _admission = domain.try_admit().map_err(MapInError::DomainBusy)?;
 
-    match mode {
-        LocalMode::Sequential | LocalMode::Inner => {
-            pool.install(|| map(items, f)).map_err(MapInError::Callback)
-        }
-        LocalMode::Outer => pool
-            .install(|| {
-                let results: Vec<Result<U, E>> = items.into_par_iter().map(f).collect();
-                map(results, |result| result)
-            })
-            .map_err(MapInError::Callback),
-    }
+    run_in_pool(pool, mode, items, f).map_err(MapInError::Callback)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{map_in, MapInError};
+    use super::{in_rayon_worker_context, map_in, MapInError};
     use crate::{Domain, DomainBusy, LocalMode};
     use rayon::ThreadPoolBuilder;
     use std::error::Error;
@@ -131,6 +160,37 @@ mod tests {
         let cpus = (0..worker_count).collect();
         let domain = Domain::external(Arc::clone(&pool), cpus, worker_count).unwrap();
         (domain, pool)
+    }
+
+    #[test]
+    fn rayon_worker_guard_matches_entry_contexts() {
+        assert!(!in_rayon_worker_context());
+        assert!(!std::thread::spawn(in_rayon_worker_context).join().unwrap());
+
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        assert!(pool.install(in_rayon_worker_context));
+        assert!(pool.scope(|_| in_rayon_worker_context()));
+        assert!(!pool.in_place_scope(|_| in_rayon_worker_context()));
+
+        let (sender, receiver) = mpsc::channel();
+        rayon::scope(|scope| {
+            assert!(in_rayon_worker_context());
+            scope.spawn(|_| sender.send(in_rayon_worker_context()).unwrap());
+        });
+        assert!(receiver.recv().unwrap());
+    }
+
+    #[test]
+    fn current_pool_runner_accepts_borrowed_callback() {
+        let (domain, pool) = domain(1);
+        let bias = 10;
+        let values = [1, 2, 3];
+        let items = values.iter().collect::<Vec<_>>();
+        let callback = |value: &i32| Ok::<_, &'static str>(*value + bias);
+        let result =
+            pool.install(|| super::run_in_current_pool(LocalMode::Sequential, items, &callback));
+        assert_eq!(result.unwrap(), vec![11, 12, 13]);
+        drop(domain);
     }
 
     #[test]

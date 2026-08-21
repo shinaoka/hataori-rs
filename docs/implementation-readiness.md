@@ -19,7 +19,7 @@ Core implementation and release do not wait for the tensor adapter. Integrated t
 | Finding | Resolution in `design.md` |
 |---|---|
 | Root compute vs. FUNNELED MPI | Root uses `ThreadPool::in_place_scope`; the scope body and MPI event loop stay on the initialization thread while borrowed callback work runs in the explicit pool. |
-| Root event multiplexing fairness | Each loop checks local completion and at most one `MPI_Iprobe` message, alternates priority, and yields only when neither is ready. |
+| Root event multiplexing fairness | Each loop checks local completion and at most one `MPI_Iprobe` message, alternates priority, and yields only when neither is ready. A capacity-one local channel distinguishes `Success`, `UserError`, and `Panic`; only the MPI thread aborts. |
 | MPI-only non-`Send` callback | Root executes one local batch synchronously; communication resumes after the finite callback. |
 | Undefined `Inner { budget }` | P0 uses whole-domain `Inner` with no partial budget. The adapter captures and validates its explicit same-pool context. |
 | Divergent local validation | A collective preflight converges validation before scheduler traffic. Collective order/communicator identity remain caller preconditions. |
@@ -79,7 +79,7 @@ A temporary proof built and ran with `rayon 1.12.0` / `rayon-core 1.13.0` on 202
 - a spawned callback borrows stack-owned input and runs on a target-pool worker;
 - nested parallel iteration observes only the target pool's two worker indices.
 
-The equivalent proof becomes a checked-in regression test before the hybrid scheduler merges.
+The equivalent proof becomes a checked-in regression test before the hybrid scheduler merges. It also pins Rayon’s join-before-return/unwind guarantee for borrowed jobs. Hybrid `pmap` uses a pure Rayon-only helper as its first operation and locally rejects exactly callers for which `rayon::current_thread_index()` is `Some`, before any state change or MPI call. This check cannot join collective preflight under `FUNNELED`; rank disagreement is caller misuse. An MPI-free matrix records the predicate in plain main/ordinary threads and plain/custom/global worker, `ThreadPool::install`, `ThreadPool::scope`, `ThreadPool::in_place_scope`, and `rayon::scope` contexts on the selected Rayon version. Only `ThreadPool::in_place_scope` keeps its body on the plain MPI calling thread and reports `None`; the other listed pool/scope bodies report `Some` and are rejected. Correct participation still requires every rank to enter on the MPI initialization thread.
 
 ### MPI error reduction
 

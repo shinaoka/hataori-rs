@@ -1,3 +1,9 @@
+#[cfg(feature = "rayon")]
+use mpi_upstream as mpi_api;
+#[cfg(feature = "rayon")]
+#[path = "support/hybrid_smoke.rs"]
+mod hybrid_smoke;
+
 #[cfg(not(feature = "rayon"))]
 use hataori::{pmap, Domain, LocalMode, PmapErrorKind, PmapOptions};
 #[cfg(not(feature = "rayon"))]
@@ -15,7 +21,13 @@ fn options(batch_size: usize) -> PmapOptions {
 }
 
 #[cfg(feature = "rayon")]
-fn main() {}
+fn main() {
+    use mpi_upstream::environment::Threading;
+    let (universe, provided) = mpi_upstream::initialize_with_threading(Threading::Funneled)
+        .expect("MPI must not already be initialized or finalized");
+    assert!(provided >= Threading::Funneled);
+    hybrid_smoke::run(&universe.world());
+}
 
 #[cfg(not(feature = "rayon"))]
 fn main() {
