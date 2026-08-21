@@ -40,7 +40,10 @@ The default build is standard-library-only. P0 keeps one crate with optional fea
 | `rsmpi-rt` | [`tensor4all/rsmpi-rt`](https://github.com/tensor4all/rsmpi-rt) as package `mpi`, plus `serde` and `bincode` |
 | Linux managed affinity | `libc` |
 
-The optional tensor integration is a separate adapter crate depending on Hataori, tenferro, and tensor4all so those dependency trees never enter ordinary Hataori builds.
+Optional integration stays in separate workspace crates so those dependency
+trees never enter ordinary Hataori builds. Phase 20a provides the tenferro-only
+`hataori-tenferro` foundation pinned to tenferro merge `a21a4c602fc6700b9bc0c3f1b14ebd19b9d7ec45`;
+Phase 20b adds tensor4all contexts and reconstruction after tensor4all-rs#663.
 
 Hataori uses standard-library collections, synchronization, channels, and errors. P0 does not add an async runtime, general channel/locking crate, error-derive crate, logging facade, CLI framework, topology library, or generic transport/executor plugin system.
 
@@ -75,28 +78,26 @@ Core treats input `T`, output `U`, and error `E` as generic values. It has no te
 
 ### 2.2 Optional integration adapter
 
-Tensor integration belongs in an optional adapter that depends on Hataori core, tenferro, and tensor4all:
+Integration is split at the upstream contract boundary:
 
 ```text
-hataori
-    ^
-    |
-hataori tensor adapter ---> tenferro
-    |
-    +----------------------> tensor4all
+hataori-tenferro ---> hataori
+       |
+       +-----------> tenferro
 
-tensor4all ---> tenferro
+future tensor adapter ---> hataori-tenferro
+       |
+       +-----------------> tensor4all ---> tenferro
+
 tenferro   -X-> hataori
 tensor4all -X-> hataori
 ```
 
-The adapter owns:
-
-- tenferro external-domain handles and caller-managed admission mapping;
-- tensor4all explicit contexts and domain-owned runtimes/caches;
-- tensor logical wire representation and reconstruction in the target context;
-- backend/provider checks such as BLAS or OpenMP thread policy;
-- integration-specific errors and capability gates.
+`hataori-tenferro` owns tenferro external-domain handles, caller-managed
+admission mapping, same-pool checks, and provider capability enforcement. The
+future tensor adapter owns tensor4all explicit contexts and domain-owned
+runtimes/caches, tensor logical wire representation and target-context
+reconstruction, and context-specific errors.
 
 Neither tenferro nor tensor4all may depend on Hataori types. Hataori core must build without either dependency.
 
@@ -378,14 +379,17 @@ P0 uses scoped synchronous execution and does not add `'static` for hypothetical
 
 ## 13. Tensor integration contract
 
-The optional adapter establishes this ownership chain:
+Phase 20a establishes this ownership chain:
 
 ```text
 Hataori domain
-  -> tensor4all explicit context and domain-owned runtimes/caches
-    -> tenferro caller-managed external domain
-      -> the same Rayon pool
+  -> tenferro caller-managed external domain
+    -> the same Rayon pool
 ```
+
+Phase 20b places tensor4all's explicit context and domain-owned runtimes/caches
+above that bound tenferro backend; it does not replace the pool or admission
+chain.
 
 Required tenferro capabilities:
 
@@ -476,12 +480,13 @@ Backend-specific errors do not enter the core error enum.
 - An `rsmpi-rt` build succeeds without MPI headers, a C compiler, or libclang, then passes a multi-rank smoke test with `MPI_RT_LIB` set.
 - Hataori can use a caller-supplied communicator without owning MPI initialization/finalization.
 
-### Three-repository integration
+### Adapter and three-repository integration
 
-- Hataori's running slot is the only coarse CPU admission.
+- `hataori-tenferro` preserves Hataori's running slot as the only coarse CPU admission.
 - tenferro's CPU arbiter is not acquired in caller-managed mode.
 - Same-pool inner fork/join creates no pool or OS thread and does not panic or deadlock.
-- tensor4all plain, graph, and eager AD paths all use the explicit target context.
+- Concurrent adapter entry is rejected before tenferro's panic-on-collision guard.
+- tensor4all plain, graph, and eager AD paths all use the explicit target context after Phase 20b.
 - Global/default tensor runtime sentinels remain untouched.
 - Remote tensor reconstruction occurs in the target context and serializes no execution identity.
 - Outer and Inner each have exactly one fan-out owner.

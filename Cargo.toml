@@ -1,3 +1,8 @@
+[workspace]
+members = ["adapters/tenferro"]
+default-members = ["."]
+resolver = "2"
+
 [package]
 name = "hataori"
 version = "0.1.0"

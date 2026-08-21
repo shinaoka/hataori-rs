@@ -450,6 +450,30 @@ impl Domain {
     }
 
     #[cfg(feature = "rayon")]
+    /// Clones the Rayon pool handle associated with this domain, when present.
+    ///
+    /// This grants no domain admission. Submitting work directly to the returned
+    /// pool bypasses Hataori scheduling; integration adapters must enter through
+    /// an already admitted [`LocalMode::Inner`] callback.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "rayon")]
+    /// # {
+    /// use hataori::Domain;
+    /// use std::sync::Arc;
+    ///
+    /// let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+    /// let domain = Domain::external(Arc::clone(&pool), vec![0], 1).unwrap();
+    /// assert!(Arc::ptr_eq(&pool, &domain.rayon_pool_handle().unwrap()));
+    /// # }
+    /// ```
+    pub fn rayon_pool_handle(&self) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+        self.pool.clone()
+    }
+
+    #[cfg(feature = "rayon")]
     pub(crate) fn rayon_pool(&self) -> Option<&std::sync::Arc<rayon::ThreadPool>> {
         self.pool.as_ref()
     }
