@@ -84,3 +84,15 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - Non-blocking note: the crate-visible 4096-byte cap is retained for later `PmapError` reuse.
+
+### Task #11 — `Domain` and RAII admission
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after timeout)
+- Pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable)
+- Scope: dependency-free `DomainId`, `Place`, sequential `Domain`, typed validation errors, and nonblocking RAII `DomainAdmission`
+- Pre-review refinements applied: name `NegativeRank`; expose only `DomainId::get`; derive `Debug`; omit speculative guard accessors/auto-trait controls; defer the MPI pmap reentrancy guard to the first pmap task.
+- Integration verification: ID/Place validation, sequential facts, nested contention, success/error/unwind release, deterministic scoped cross-thread contention, and runnable rustdoc are covered; all feature-set gates run before push.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
