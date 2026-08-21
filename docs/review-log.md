@@ -211,3 +211,17 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; final bounded evidence retry after repository-read timeouts)
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
+
+### Task #19 — complete core acceptance matrix
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; bounded retry after timeout)
+- Pre-implementation Round 1 verdict: **Changes requested**
+- Required fixes: add an explicit fault-free control; assert both assigned fault channels rather than only the final winner; add root/whole-job watchdogs; enforce future MPI-call assertion coverage; pin receive-before-decode length validation.
+- Fixes applied: test-only assignment/error counters, exact winner and reuse checks, bounded marker plus process-group watchdog, cfg(test) zero-release-overhead `mpi_call!`, balanced source scanner, and malformed-length drain test are mandatory. Dependency-internal MPI calls are explicitly outside the Hataori-owned boundary.
+- Follow-up pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable; bounded timeout after the initial MPI-call assertion slice), with parent completion of deterministic fault seams, source scanner, downstream compile fixtures, orchestration, CI, and acceptance ledger.
+- Scope: cfg(test) MPI-main assertions and one-shot fault traces; simultaneous user/decode drain/reuse test; size-one codec counters; delayed/extra-rank smoke; compile-pass/fail fixtures; one-command core matrix; pinned-source CI.
+- Verification: `scripts/check-core.sh` passed in full with both MPI backends, all six feature sets, Rust 1.85, all-target clippy/doc, poisoned runtime build, n=1/2/4 pmap/hybrid/placement, rendezvous/panic/fault watchdogs, source-boundary scanner, dependency trees, and downstream compile boundaries.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only; bounded evidence retry after repository timeout)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none

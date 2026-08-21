@@ -1,7 +1,7 @@
 use crate::map::{truncate_message, MAX_ERROR_MESSAGE_BYTES};
-use crate::mpi_backend;
 use crate::mpi_backend::collective::SystemOperation;
 use crate::mpi_backend::traits::*;
+use crate::mpi_check::{is_thread_main, mpi_call};
 use crate::wire::{self, Header, MessageKind, MessageStatus};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::{self, Display, Formatter};
@@ -128,21 +128,21 @@ impl PlacementErrorKind {
 }
 
 fn converge<C: Communicator>(comm: &C, local: Option<Failure>) -> Option<PlacementError> {
-    let rank = comm.rank();
-    let size = comm.size();
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let candidate = if local.is_some() { rank } else { size };
     let mut winner = candidate;
-    comm.all_reduce_into(&candidate, &mut winner, SystemOperation::min());
+    mpi_call!(comm.all_reduce_into(&candidate, &mut winner, SystemOperation::min()));
     if winner == size {
         return None;
     }
     if winner < 0 || winner >= size {
-        comm.abort(74);
+        mpi_call!(comm.abort(74));
     }
 
     let is_winner = rank == winner;
     if is_winner && local.is_none() {
-        comm.abort(74);
+        mpi_call!(comm.abort(74));
     }
     let mut kind = local
         .as_ref()
@@ -155,34 +155,29 @@ fn converge<C: Communicator>(comm: &C, local: Option<Failure>) -> Option<Placeme
         .map_or_else(Vec::new, |failure| failure.message.into_bytes());
     let mut length = match i32::try_from(bytes.len()) {
         Ok(length) => length,
-        Err(_) => comm.abort(74),
+        Err(_) => mpi_call!(comm.abort(74)),
     };
 
-    comm.process_at_rank(winner).broadcast_into(&mut kind);
-    comm.process_at_rank(winner).broadcast_into(&mut length);
+    mpi_call!(comm.process_at_rank(winner).broadcast_into(&mut kind));
+    mpi_call!(comm.process_at_rank(winner).broadcast_into(&mut length));
     if length < 0 || length as usize > MAX_ERROR_MESSAGE_BYTES {
-        comm.abort(74);
+        mpi_call!(comm.abort(74));
     }
     if !is_winner {
         bytes.resize(length as usize, 0);
     }
-    comm.process_at_rank(winner)
-        .broadcast_into(bytes.as_mut_slice());
+    mpi_call!(comm
+        .process_at_rank(winner)
+        .broadcast_into(bytes.as_mut_slice()));
 
     let Some(kind) = PlacementErrorKind::from_code(kind) else {
-        comm.abort(74);
+        mpi_call!(comm.abort(74));
     };
     let message = match String::from_utf8(bytes) {
         Ok(message) => message,
-        Err(_) => comm.abort(74),
+        Err(_) => mpi_call!(comm.abort(74)),
     };
     Some(PlacementError::new(kind, Some(winner), message))
-}
-
-fn is_thread_main() -> bool {
-    let mut flag = 0;
-    unsafe { mpi_backend::ffi::MPI_Is_thread_main(&mut flag) };
-    flag != 0
 }
 
 fn preflight<C: Communicator>(
@@ -194,15 +189,15 @@ fn preflight<C: Communicator>(
     let local_operation = operation.code();
     let mut min_operation = local_operation;
     let mut max_operation = local_operation;
-    comm.all_reduce_into(&local_operation, &mut min_operation, SystemOperation::min());
-    comm.all_reduce_into(&local_operation, &mut max_operation, SystemOperation::max());
+    mpi_call!(comm.all_reduce_into(&local_operation, &mut min_operation, SystemOperation::min()));
+    mpi_call!(comm.all_reduce_into(&local_operation, &mut max_operation, SystemOperation::max()));
 
     let mut min_root = root;
     let mut max_root = root;
-    comm.all_reduce_into(&root, &mut min_root, SystemOperation::min());
-    comm.all_reduce_into(&root, &mut max_root, SystemOperation::max());
+    mpi_call!(comm.all_reduce_into(&root, &mut min_root, SystemOperation::min()));
+    mpi_call!(comm.all_reduce_into(&root, &mut max_root, SystemOperation::max()));
 
-    let size = comm.size();
+    let size = mpi_call!(comm.size());
     let local = if min_operation != max_operation {
         Some(Failure::new(
             PlacementErrorKind::Preflight,
@@ -250,21 +245,24 @@ fn send_frame<C: Communicator>(comm: &C, destination: i32, operation: Operation,
         payload.len() as u64,
     ) {
         Ok(header) => header,
-        Err(_) => comm.abort(74),
+        Err(_) => mpi_call!(comm.abort(74)),
     };
-    comm.process_at_rank(destination)
-        .send_with_tag(&header.encode(), HEADER_TAG);
-    comm.process_at_rank(destination)
-        .send_with_tag(payload, PAYLOAD_TAG);
+    mpi_call!(comm
+        .process_at_rank(destination)
+        .send_with_tag(&header.encode(), HEADER_TAG));
+    mpi_call!(comm
+        .process_at_rank(destination)
+        .send_with_tag(payload, PAYLOAD_TAG));
 }
 
 fn receive_frame<C: Communicator>(comm: &C, source: i32) -> (Vec<u8>, Vec<u8>) {
-    let (header, _) = comm
+    // Drain both actual MPI messages before inspecting an untrusted header.
+    let (header, _) = mpi_call!(comm
         .process_at_rank(source)
-        .receive_vec_with_tag::<u8>(HEADER_TAG);
-    let (payload, _) = comm
+        .receive_vec_with_tag::<u8>(HEADER_TAG));
+    let (payload, _) = mpi_call!(comm
         .process_at_rank(source)
-        .receive_vec_with_tag::<u8>(PAYLOAD_TAG);
+        .receive_vec_with_tag::<u8>(PAYLOAD_TAG));
     (header, payload)
 }
 
@@ -335,9 +333,9 @@ where
     C: Communicator,
     T: Serialize + DeserializeOwned,
 {
-    let comm = world.duplicate();
-    let rank = comm.rank();
-    let size = comm.size();
+    let comm = mpi_call!(world.duplicate());
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     preflight(
         &comm,
         Operation::Broadcast,
@@ -346,7 +344,7 @@ where
     )?;
 
     if size == 1 {
-        return Ok(root_value.unwrap_or_else(|| comm.abort(74)));
+        return Ok(root_value.unwrap_or_else(|| mpi_call!(comm.abort(74))));
     }
 
     let (encoded, encode_failure) = if rank == root {
@@ -373,7 +371,9 @@ where
     let mut received = None;
     let mut local_failure = None;
     if rank == root {
-        let payload = encoded.as_deref().unwrap_or_else(|| comm.abort(74));
+        let payload = encoded
+            .as_deref()
+            .unwrap_or_else(|| mpi_call!(comm.abort(74)));
         for destination in 0..size {
             if destination != root {
                 send_frame(&comm, destination, Operation::Broadcast, payload);
@@ -391,9 +391,9 @@ where
     }
 
     if rank == root {
-        Ok(root_value.unwrap_or_else(|| comm.abort(74)))
+        Ok(root_value.unwrap_or_else(|| mpi_call!(comm.abort(74))))
     } else {
-        Ok(received.unwrap_or_else(|| comm.abort(74)))
+        Ok(received.unwrap_or_else(|| mpi_call!(comm.abort(74))))
     }
 }
 
@@ -406,9 +406,9 @@ where
     C: Communicator,
     T: Serialize + DeserializeOwned,
 {
-    let comm = world.duplicate();
-    let rank = comm.rank();
-    let size = comm.size();
+    let comm = mpi_call!(world.duplicate());
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let local_shape = (rank == root) == root_shards.is_some()
         && (rank != root
             || root_shards
@@ -421,12 +421,12 @@ where
         return Ok(shards
             .as_mut()
             .and_then(|shards| shards[0].take())
-            .unwrap_or_else(|| comm.abort(74)));
+            .unwrap_or_else(|| mpi_call!(comm.abort(74))));
     }
 
     let (local_value, encoded, encode_failure) = if rank == root {
         preencode_scatter(
-            shards.as_mut().unwrap_or_else(|| comm.abort(74)),
+            shards.as_mut().unwrap_or_else(|| mpi_call!(comm.abort(74))),
             root,
             size,
         )
@@ -444,7 +444,7 @@ where
             if destination != root {
                 let payload = encoded[destination as usize]
                     .as_deref()
-                    .unwrap_or_else(|| comm.abort(74));
+                    .unwrap_or_else(|| mpi_call!(comm.abort(74)));
                 send_frame(&comm, destination, Operation::Scatter, payload);
             }
         }
@@ -460,9 +460,9 @@ where
     }
 
     if rank == root {
-        Ok(local_value.unwrap_or_else(|| comm.abort(74)))
+        Ok(local_value.unwrap_or_else(|| mpi_call!(comm.abort(74))))
     } else {
-        Ok(received.unwrap_or_else(|| comm.abort(74)))
+        Ok(received.unwrap_or_else(|| mpi_call!(comm.abort(74))))
     }
 }
 
@@ -475,9 +475,9 @@ where
     C: Communicator,
     T: Serialize + DeserializeOwned,
 {
-    let comm = world.duplicate();
-    let rank = comm.rank();
-    let size = comm.size();
+    let comm = mpi_call!(world.duplicate());
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     preflight(&comm, Operation::Gather, root, true)?;
 
     if size == 1 {
@@ -512,7 +512,9 @@ where
             let (header, payload) = receive_frame(&comm, source);
             match decode_received(&header, &payload, Operation::Gather) {
                 Ok(value) => {
-                    gathered.as_mut().unwrap_or_else(|| comm.abort(74))[source as usize] =
+                    gathered
+                        .as_mut()
+                        .unwrap_or_else(|| mpi_call!(comm.abort(74)))[source as usize] =
                         Some(value);
                 }
                 Err(error) => record_failure(&mut local_failure, error),
@@ -523,7 +525,9 @@ where
             &comm,
             root,
             Operation::Gather,
-            encoded.as_deref().unwrap_or_else(|| comm.abort(74)),
+            encoded
+                .as_deref()
+                .unwrap_or_else(|| mpi_call!(comm.abort(74))),
         );
     }
     if let Some(error) = converge(&comm, local_failure) {
@@ -531,10 +535,10 @@ where
     }
 
     if rank == root {
-        let values = gathered.unwrap_or_else(|| comm.abort(74));
+        let values = gathered.unwrap_or_else(|| mpi_call!(comm.abort(74)));
         let mut output = Vec::with_capacity(size as usize);
         for value in values {
-            output.push(value.unwrap_or_else(|| comm.abort(74)));
+            output.push(value.unwrap_or_else(|| mpi_call!(comm.abort(74))));
         }
         Ok(Some(output))
     } else {
@@ -574,6 +578,25 @@ mod tests {
             assert_eq!(header.kind(), operation.message_kind());
             assert_eq!(Header::decode(&header.encode()).unwrap(), header);
         }
+    }
+
+    #[test]
+    fn malformed_announced_length_is_rejected_after_payload_is_available() {
+        let header = Header::new(
+            MessageKind::Broadcast,
+            MessageStatus::None,
+            FRAME_ID,
+            FRAME_ITEMS,
+            8,
+        )
+        .unwrap();
+        let error =
+            decode_received::<i32>(&header.encode(), &[0_u8; 4], Operation::Broadcast).unwrap_err();
+        assert_eq!(error.kind, PlacementErrorKind::Protocol);
+        assert_eq!(
+            error.message,
+            "placement payload length does not match its header"
+        );
     }
 
     #[test]

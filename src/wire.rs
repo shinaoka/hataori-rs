@@ -2,11 +2,32 @@ use crate::map::truncate_message;
 use bincode::config::{self, Configuration};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
+#[cfg(all(test, not(feature = "rayon")))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const PROTOCOL_VERSION: u16 = 1;
 pub(crate) const MAX_WIRE_BYTES: u64 = i32::MAX as u64;
 pub(crate) const HEADER_LEN: usize = 28;
 pub(crate) const NO_ERROR_KEY: i64 = i64::MAX;
+
+#[cfg(all(test, not(feature = "rayon")))]
+static ENCODE_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, not(feature = "rayon")))]
+static DECODE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(test, not(feature = "rayon")))]
+pub(crate) fn reset_codec_counts() {
+    ENCODE_CALLS.store(0, Ordering::SeqCst);
+    DECODE_CALLS.store(0, Ordering::SeqCst);
+}
+
+#[cfg(all(test, not(feature = "rayon")))]
+pub(crate) fn codec_counts() -> (usize, usize) {
+    (
+        ENCODE_CALLS.load(Ordering::SeqCst),
+        DECODE_CALLS.load(Ordering::SeqCst),
+    )
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum MessageKind {
@@ -204,6 +225,8 @@ fn wire_config() -> Configuration<config::LittleEndian, config::Fixint> {
 }
 
 pub(crate) fn encode_payload<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError> {
+    #[cfg(all(test, not(feature = "rayon")))]
+    ENCODE_CALLS.fetch_add(1, Ordering::SeqCst);
     let bytes =
         bincode::serde::encode_to_vec(value, wire_config()).map_err(|error| WireError::Encode {
             detail: truncate_message(error.to_string()),
@@ -213,6 +236,8 @@ pub(crate) fn encode_payload<T: Serialize>(value: &T) -> Result<Vec<u8>, WireErr
 }
 
 pub(crate) fn decode_payload<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WireError> {
+    #[cfg(all(test, not(feature = "rayon")))]
+    DECODE_CALLS.fetch_add(1, Ordering::SeqCst);
     validate_payload_len(bytes.len() as u64)?;
     let (value, used) =
         bincode::serde::decode_from_slice(bytes, wire_config()).map_err(|error| {

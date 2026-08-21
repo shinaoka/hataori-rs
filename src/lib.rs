@@ -5,6 +5,8 @@ mod domain;
 mod local;
 mod map;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
+mod mpi_check;
+#[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 mod placement;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 mod pmap;

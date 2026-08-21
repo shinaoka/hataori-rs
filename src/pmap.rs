@@ -2,9 +2,11 @@ use crate::domain::{Domain, LocalMode};
 #[cfg(feature = "rayon")]
 use crate::local::{in_rayon_worker_context, run_in_current_pool, run_in_pool};
 use crate::map::truncate_message;
+#[cfg(feature = "rayon")]
 use crate::mpi_backend;
 use crate::mpi_backend::collective::SystemOperation;
 use crate::mpi_backend::traits::*;
+use crate::mpi_check::mpi_call;
 use crate::scheduler::{BatchId, Coordinator, Dispatch, ItemResult, SchedulerError};
 use crate::wire::{self, ErrorClass, ErrorKey, Header, MessageKind, MessageStatus};
 #[cfg(feature = "rayon")]
@@ -13,11 +15,46 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt::{self, Display, Formatter};
 use std::num::NonZeroUsize;
+#[cfg(all(test, not(feature = "rayon")))]
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "rayon")]
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
 const HEADER_TAG: i32 = 0;
 const PAYLOAD_TAG: i32 = 1;
+
+#[cfg(all(test, not(feature = "rayon")))]
+static CORRUPT_NEXT_RESULT: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, not(feature = "rayon")))]
+static FAULT_PHASE: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, not(feature = "rayon")))]
+static TEST_ASSIGNED_REMOTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(test, not(feature = "rayon")))]
+static TEST_USER_RESULTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(test, not(feature = "rayon")))]
+static TEST_DECODE_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(all(test, not(feature = "rayon")))]
+fn reset_fault_trace() {
+    CORRUPT_NEXT_RESULT.store(false, Ordering::SeqCst);
+    FAULT_PHASE.store(false, Ordering::SeqCst);
+    TEST_ASSIGNED_REMOTES.store(0, Ordering::SeqCst);
+    TEST_USER_RESULTS.store(0, Ordering::SeqCst);
+    TEST_DECODE_FAILURES.store(0, Ordering::SeqCst);
+}
+
+#[cfg(all(test, not(feature = "rayon")))]
+fn wait_for_marker(path: &std::path::Path) {
+    let observed = (0..500).any(|_| {
+        if path.exists() {
+            true
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            false
+        }
+    });
+    assert!(observed, "timed out waiting for fault-test marker");
+}
 
 type LocalError = (PmapErrorKind, String);
 type RootOutcome<U> = (Vec<U>, i64, Option<LocalError>);
@@ -172,20 +209,21 @@ fn header(
 }
 
 fn send_header<C: Communicator>(comm: &C, rank: i32, value: Header) {
-    comm.process_at_rank(rank)
-        .send_with_tag(&value.encode(), HEADER_TAG);
+    mpi_call!(comm
+        .process_at_rank(rank)
+        .send_with_tag(&value.encode(), HEADER_TAG));
 }
 
 fn receive_header<C: Communicator>(comm: &C, rank: i32) -> Result<Header, PmapError> {
-    let (bytes, _) = comm
+    let (bytes, _) = mpi_call!(comm
         .process_at_rank(rank)
-        .receive_vec_with_tag::<u8>(HEADER_TAG);
+        .receive_vec_with_tag::<u8>(HEADER_TAG));
     Header::decode(&bytes).map_err(wire_error)
 }
 
 #[cfg(not(feature = "rayon"))]
 fn receive_any_header<C: Communicator>(comm: &C) -> Result<(i32, Header), PmapError> {
-    let (bytes, status) = comm.any_process().receive_vec_with_tag::<u8>(HEADER_TAG);
+    let (bytes, status) = mpi_call!(comm.any_process().receive_vec_with_tag::<u8>(HEADER_TAG));
     Header::decode(&bytes)
         .map(|value| (status.source_rank(), value))
         .map_err(wire_error)
@@ -198,9 +236,9 @@ fn receive_payload<C: Communicator, T: DeserializeOwned>(
 ) -> Result<T, PmapError> {
     let count = wire::checked_mpi_count(value.payload_len()).map_err(wire_error)?;
     let _length = wire::checked_usize_length(value.payload_len()).map_err(wire_error)?;
-    let (bytes, _) = comm
+    let (bytes, _) = mpi_call!(comm
         .process_at_rank(rank)
-        .receive_vec_with_tag::<u8>(PAYLOAD_TAG);
+        .receive_vec_with_tag::<u8>(PAYLOAD_TAG));
     if bytes.len() != count as usize {
         return Err(protocol_error("payload length does not match its header"));
     }
@@ -217,10 +255,20 @@ fn send_frame<C: Communicator, T: Serialize>(
     payload: &T,
 ) -> Result<(), PmapError> {
     let bytes = wire::encode_payload(payload).map_err(wire_error)?;
+    #[cfg(all(test, not(feature = "rayon")))]
+    let mut bytes = bytes;
+    #[cfg(all(test, not(feature = "rayon")))]
+    if kind == MessageKind::Result
+        && mpi_call!(comm.rank()) == 1
+        && CORRUPT_NEXT_RESULT.swap(false, Ordering::SeqCst)
+    {
+        bytes = vec![0xff];
+    }
     let value = header(kind, status, batch_id, item_count as u64, bytes.len())?;
     send_header(comm, rank, value);
-    comm.process_at_rank(rank)
-        .send_with_tag(bytes.as_slice(), PAYLOAD_TAG);
+    mpi_call!(comm
+        .process_at_rank(rank)
+        .send_with_tag(bytes.as_slice(), PAYLOAD_TAG));
     Ok(())
 }
 
@@ -337,7 +385,7 @@ fn error_key(
 
 fn convergence<C: Communicator>(comm: &C, local_key: i64) -> i64 {
     let mut selected = local_key;
-    comm.all_reduce_into(&local_key, &mut selected, SystemOperation::min());
+    mpi_call!(comm.all_reduce_into(&local_key, &mut selected, SystemOperation::min()));
     selected
 }
 
@@ -350,11 +398,11 @@ fn broadcast_error<C: Communicator>(
     if selected == ErrorKey::NO_ERROR_KEY {
         return Ok(None);
     }
-    if selected < 0 || comm.size() <= 0 {
+    if selected < 0 || mpi_call!(comm.size()) <= 0 {
         return Err(protocol_error("invalid selected error key"));
     }
-    let winner = (selected % i64::from(comm.size())) as i32;
-    let is_winner = comm.rank() == winner;
+    let winner = (selected % i64::from(mpi_call!(comm.size()))) as i32;
+    let is_winner = mpi_call!(comm.rank()) == winner;
     let winner_local = if is_winner && local_key == selected {
         local
     } else if is_winner {
@@ -367,8 +415,8 @@ fn broadcast_error<C: Communicator>(
         .as_ref()
         .map_or(PmapErrorKind::Protocol.code(), |(kind, _)| kind.code());
     let mut key = selected;
-    comm.process_at_rank(winner).broadcast_into(&mut kind);
-    comm.process_at_rank(winner).broadcast_into(&mut key);
+    mpi_call!(comm.process_at_rank(winner).broadcast_into(&mut kind));
+    mpi_call!(comm.process_at_rank(winner).broadcast_into(&mut key));
     if key != selected {
         return Err(protocol_error("broadcast error key mismatch"));
     }
@@ -378,26 +426,21 @@ fn broadcast_error<C: Communicator>(
         .unwrap_or_default();
     let mut length = i32::try_from(message.len())
         .map_err(|_| protocol_error("error message length overflow"))?;
-    comm.process_at_rank(winner).broadcast_into(&mut length);
+    mpi_call!(comm.process_at_rank(winner).broadcast_into(&mut length));
     if length < 0 || length as usize > crate::map::MAX_ERROR_MESSAGE_BYTES {
         return Err(protocol_error("invalid broadcast error message length"));
     }
     if !is_winner {
         message.resize(length as usize, 0);
     }
-    comm.process_at_rank(winner)
-        .broadcast_into(message.as_mut_slice());
+    mpi_call!(comm
+        .process_at_rank(winner)
+        .broadcast_into(message.as_mut_slice()));
 
     let kind =
         PmapErrorKind::from_code(kind).ok_or_else(|| protocol_error("invalid error kind"))?;
     let message = String::from_utf8(message).map_err(protocol_error)?;
     Ok(Some((kind, message)))
-}
-
-fn is_thread_main() -> bool {
-    let mut flag = 0;
-    unsafe { mpi_backend::ffi::MPI_Is_thread_main(&mut flag) };
-    flag != 0
 }
 
 fn preflight<C, T>(
@@ -409,8 +452,8 @@ fn preflight<C, T>(
 where
     C: Communicator,
 {
-    let rank = comm.rank();
-    let size = comm.size();
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let local_batch = options.batch_size.get() as u64;
     let local_mode = match options.local_mode {
         LocalMode::Sequential => 0_i32,
@@ -424,14 +467,14 @@ where
     let mut max_batch = local_batch;
     let mut min_mode = local_mode;
     let mut max_mode = local_mode;
-    comm.all_reduce_into(&options.root, &mut min_root, SystemOperation::min());
-    comm.all_reduce_into(&options.root, &mut max_root, SystemOperation::max());
-    comm.all_reduce_into(&local_batch, &mut min_batch, SystemOperation::min());
-    comm.all_reduce_into(&local_batch, &mut max_batch, SystemOperation::max());
-    comm.all_reduce_into(&local_mode, &mut min_mode, SystemOperation::min());
-    comm.all_reduce_into(&local_mode, &mut max_mode, SystemOperation::max());
+    mpi_call!(comm.all_reduce_into(&options.root, &mut min_root, SystemOperation::min()));
+    mpi_call!(comm.all_reduce_into(&options.root, &mut max_root, SystemOperation::max()));
+    mpi_call!(comm.all_reduce_into(&local_batch, &mut min_batch, SystemOperation::min()));
+    mpi_call!(comm.all_reduce_into(&local_batch, &mut max_batch, SystemOperation::max()));
+    mpi_call!(comm.all_reduce_into(&local_mode, &mut min_mode, SystemOperation::min()));
+    mpi_call!(comm.all_reduce_into(&local_mode, &mut max_mode, SystemOperation::max()));
 
-    let local_valid = is_thread_main()
+    let local_valid = mpi_call!(crate::mpi_check::is_thread_main())
         && options.root >= 0
         && options.root < size
         && ((rank == options.root) == root_items.is_some())
@@ -441,7 +484,7 @@ where
         && min_mode == max_mode;
     let candidate = wire::preflight_candidate(!local_valid, rank, size).map_err(wire_error)?;
     let mut failing_rank = candidate;
-    comm.all_reduce_into(&candidate, &mut failing_rank, SystemOperation::min());
+    mpi_call!(comm.all_reduce_into(&candidate, &mut failing_rank, SystemOperation::min()));
     if failing_rank != size {
         return Err(PmapError::new(
             PmapErrorKind::Preflight,
@@ -464,12 +507,19 @@ where
     E: Display,
     F: FnMut(T) -> Result<U, E>,
 {
-    let rank = comm.rank();
-    let size = comm.size();
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let mut local_key = ErrorKey::NO_ERROR_KEY;
     let mut local_error = None;
 
     loop {
+        #[cfg(all(test, not(feature = "rayon")))]
+        if FAULT_PHASE.load(Ordering::SeqCst) && rank >= 2 {
+            if let Some(base) = std::env::var_os("HATAORI_FAULT_MARKER") {
+                let assigned = std::path::PathBuf::from(base).with_extension("assigned");
+                wait_for_marker(&assigned);
+            }
+        }
         send_empty(comm, root, MessageKind::Ready, 0)?;
         let value = receive_header(comm, root)?;
         match value.kind() {
@@ -511,7 +561,7 @@ where
                             });
                             break;
                         }
-                        Err(_) => comm.abort(71),
+                        Err(_) => mpi_call!(comm.abort(71)),
                     }
                 }
                 match failure {
@@ -566,8 +616,8 @@ where
     E: Display + Send,
     F: Fn(T) -> Result<U, E> + Send + Sync,
 {
-    let rank = comm.rank();
-    let size = comm.size();
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let mut local_key = ErrorKey::NO_ERROR_KEY;
     let mut local_error = None;
 
@@ -620,7 +670,7 @@ where
                         local_error = Some((PmapErrorKind::User, failure.message.clone()));
                         ResultPayload::Error(failure)
                     }
-                    Err(_) => comm.abort(71),
+                    Err(_) => mpi_call!(comm.abort(71)),
                 };
                 match result {
                     ResultPayload::Values(values) => {
@@ -690,7 +740,7 @@ where
                 failure = Some((index, truncate_message(error.to_string())));
                 break;
             }
-            Err(_) => comm.abort(70),
+            Err(_) => mpi_call!(comm.abort(70)),
         }
     }
     match failure {
@@ -737,6 +787,10 @@ where
     match value.kind() {
         MessageKind::Ready => match scheduler.on_remote_ready(source).map_err(scheduler_error)? {
             Dispatch::Task(batch) => {
+                #[cfg(all(test, not(feature = "rayon")))]
+                if (0..64).contains(&source) {
+                    TEST_ASSIGNED_REMOTES.fetch_or(1_u64 << source, Ordering::SeqCst);
+                }
                 let batch_id = batch.id();
                 let items: Vec<(usize, T)> = batch
                     .into_items()
@@ -759,6 +813,9 @@ where
             let payload: ResultPayload<U> = match receive_payload(comm, source, value) {
                 Ok(payload) => payload,
                 Err(error) => {
+                    // receive_payload consumed the actual payload before decode failed.
+                    #[cfg(all(test, not(feature = "rayon")))]
+                    TEST_DECODE_FAILURES.fetch_add(1, Ordering::SeqCst);
                     let key = error_key(call_task_key, ErrorClass::WireProtocol, rank, size)?;
                     *local_key = (*local_key).min(key);
                     *local_error = Some((error.kind(), error.message().to_owned()));
@@ -779,6 +836,8 @@ where
                         .map_err(scheduler_error)?;
                 }
                 (MessageStatus::Error, ResultPayload::Error(_failure)) => {
+                    #[cfg(all(test, not(feature = "rayon")))]
+                    TEST_USER_RESULTS.fetch_add(1, Ordering::SeqCst);
                     scheduler
                         .on_remote_error(source, BatchId::from_raw(value.batch_id()))
                         .map_err(scheduler_error)?;
@@ -825,8 +884,8 @@ where
     F: FnMut(T) -> Result<U, E>,
 {
     let root = options.root;
-    let rank = comm.rank();
-    let size = comm.size();
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let remotes: Vec<i32> = (0..size).filter(|candidate| *candidate != root).collect();
     let call_task_key = root_items.len();
     let mut scheduler = Coordinator::<T, U>::new(root, remotes, root_items, options.batch_size)
@@ -906,8 +965,8 @@ where
     F: Fn(T) -> Result<U, E> + Send + Sync,
 {
     let root = options.root;
-    let rank = comm.rank();
-    let size = comm.size();
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
     let remotes: Vec<i32> = (0..size).filter(|candidate| *candidate != root).collect();
     let call_task_key = root_items.len();
     let mut scheduler = Coordinator::<T, U>::new(root, remotes, root_items, options.batch_size)
@@ -940,8 +999,7 @@ where
                 }
             }
             let remote_source = if size > 1 {
-                comm.any_process()
-                    .immediate_probe_with_tag(HEADER_TAG)
+                mpi_call!(comm.any_process().immediate_probe_with_tag(HEADER_TAG))
                     .map(|status| status.source_rank())
             } else {
                 None
@@ -954,7 +1012,7 @@ where
             match event {
                 RootEvent::Local => {
                     if local_disconnected {
-                        comm.abort(70);
+                        mpi_call!(comm.abort(70));
                     }
                     let outcome = pending_local
                         .take()
@@ -974,7 +1032,7 @@ where
                                 .on_root_error(outcome.batch_id)
                                 .map_err(scheduler_error)?;
                         }
-                        LocalBatchResult::Panic => comm.abort(70),
+                        LocalBatchResult::Panic => mpi_call!(comm.abort(70)),
                     }
                 }
                 RootEvent::Remote => {
@@ -1058,7 +1116,7 @@ where
 {
     let _active = Active::acquire()?;
     let admission = domain.try_admit();
-    let comm = world.duplicate();
+    let comm = mpi_call!(world.duplicate());
     preflight(
         &comm,
         &options,
@@ -1070,7 +1128,7 @@ where
     )?;
     let _admission = admission.expect("successful preflight guarantees domain admission");
 
-    let rank = comm.rank();
+    let rank = mpi_call!(comm.rank());
     let outcome = if rank == options.root {
         root_loop(&comm, &options, root_items.unwrap(), f)
     } else {
@@ -1078,13 +1136,13 @@ where
     };
     let (results, local_key, local_error) = match outcome {
         Ok(outcome) => outcome,
-        Err(_) => comm.abort(72),
+        Err(_) => mpi_call!(comm.abort(72)),
     };
 
     let selected = convergence(&comm, local_key);
     let error = match broadcast_error(&comm, selected, local_key, local_error) {
         Ok(error) => error,
-        Err(_) => comm.abort(73),
+        Err(_) => mpi_call!(comm.abort(73)),
     };
     match error {
         Some((kind, message)) => Err(PmapError::keyed(kind, selected, message)),
@@ -1131,14 +1189,14 @@ where
         && pool.is_some()
         && domain.id().get() == 0
         && rayon::current_thread_index().is_none()
-        && mpi_backend::environment::threading_support()
+        && mpi_call!(mpi_backend::environment::threading_support())
             >= mpi_backend::environment::Threading::Funneled;
-    let comm = world.duplicate();
+    let comm = mpi_call!(world.duplicate());
     preflight(&comm, &options, root_items.as_ref(), execution_valid)?;
     let _admission = admission.expect("successful preflight guarantees domain admission");
     let pool = pool.expect("successful preflight guarantees a Rayon pool");
 
-    let rank = comm.rank();
+    let rank = mpi_call!(comm.rank());
     let outcome = if rank == options.root {
         hybrid_root_loop::<_, T, U, E, F>(
             &comm,
@@ -1153,18 +1211,177 @@ where
     };
     let (results, local_key, local_error) = match outcome {
         Ok(outcome) => outcome,
-        Err(_) => comm.abort(72),
+        Err(_) => mpi_call!(comm.abort(72)),
     };
 
     let selected = convergence(&comm, local_key);
     let error = match broadcast_error(&comm, selected, local_key, local_error) {
         Ok(error) => error,
-        Err(_) => comm.abort(73),
+        Err(_) => mpi_call!(comm.abort(73)),
     };
     match error {
         Some((kind, message)) => Err(PmapError::keyed(kind, selected, message)),
         None if rank == options.root => Ok(Some(results)),
         None => Ok(None),
+    }
+}
+
+#[cfg(all(test, not(feature = "rayon")))]
+mod mpi_fault_tests {
+    use super::*;
+    use serde::{Deserialize, Serialize, Serializer};
+    use std::path::PathBuf;
+
+    #[derive(Debug, Deserialize)]
+    struct NoCodec(i32);
+
+    impl Serialize for NoCodec {
+        fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(
+                "codec must not run at world size one",
+            ))
+        }
+    }
+
+    #[test]
+    fn size_one_root_paths_bypass_codec() {
+        if std::env::var_os("HATAORI_CODEC_TEST").is_none() {
+            return;
+        }
+        let universe =
+            crate::mpi_backend::initialize().expect("codec test owns MPI initialization");
+        let world = universe.world();
+        assert_eq!(mpi_call!(world.size()), 1);
+        crate::wire::reset_codec_counts();
+
+        let domain = Domain::sequential();
+        let mapped = pmap(
+            &world,
+            &domain,
+            PmapOptions::default(),
+            Some(vec![NoCodec(1)]),
+            |value| Ok::<_, String>(NoCodec(value.0 + 1)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(mapped[0].0, 2);
+        assert_eq!(crate::broadcast(&world, 0, Some(NoCodec(3))).unwrap().0, 3);
+        assert_eq!(
+            crate::scatter(&world, 0, Some(vec![NoCodec(4)])).unwrap().0,
+            4
+        );
+        assert_eq!(
+            crate::gather(&world, 0, NoCodec(5)).unwrap().unwrap()[0].0,
+            5
+        );
+        assert_eq!(crate::wire::codec_counts(), (0, 0));
+    }
+
+    #[test]
+    fn simultaneous_user_and_decode_faults_drain_and_reuse() {
+        let Some(base) = std::env::var_os("HATAORI_FAULT_MARKER") else {
+            return;
+        };
+        let universe =
+            crate::mpi_backend::initialize().expect("fault test owns MPI initialization");
+        let world = universe.world();
+        let rank = mpi_call!(world.rank());
+        let size = mpi_call!(world.size());
+        assert!(size >= 4, "fault test requires at least four ranks");
+        let base = PathBuf::from(base);
+        let assigned = base.with_extension("assigned");
+        let errored = base.with_extension("error");
+        if rank == 0 {
+            let _ = std::fs::remove_file(&assigned);
+            let _ = std::fs::remove_file(&errored);
+        }
+        mpi_call!(world.barrier());
+
+        reset_fault_trace();
+        let domain = Domain::sequential();
+        let options = PmapOptions::default();
+        let control = pmap(
+            &world,
+            &domain,
+            options,
+            (rank == 0).then(|| (0..12).collect::<Vec<i32>>()),
+            |item| Ok::<_, String>(item * 2),
+        )
+        .unwrap();
+        if rank == 0 {
+            assert_eq!(
+                control.unwrap(),
+                (0..12).map(|item| item * 2).collect::<Vec<_>>()
+            );
+        } else {
+            assert!(control.is_none());
+        }
+
+        reset_fault_trace();
+        FAULT_PHASE.store(true, Ordering::SeqCst);
+        if rank == 1 {
+            CORRUPT_NEXT_RESULT.store(true, Ordering::SeqCst);
+        }
+        mpi_call!(world.barrier());
+        let assigned_for_callback = assigned.clone();
+        let error_for_callback = errored.clone();
+        let failure = pmap(
+            &world,
+            &domain,
+            options,
+            (rank == 0).then(|| (0..32).collect::<Vec<i32>>()),
+            move |item| {
+                match rank {
+                    0 => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    1 => {
+                        std::fs::write(&assigned_for_callback, b"rank1-running").unwrap();
+                        wait_for_marker(&error_for_callback);
+                    }
+                    2 => {
+                        std::fs::write(&error_for_callback, b"rank2-error").unwrap();
+                        return Err::<i32, _>("simultaneous user failure".to_owned());
+                    }
+                    _ => {}
+                }
+                Ok(item)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind(), PmapErrorKind::User);
+        assert_eq!(failure.message(), "simultaneous user failure");
+        assert_eq!(failure.key().unwrap() % i64::from(size), 2);
+        if rank == 0 {
+            let assigned_mask = TEST_ASSIGNED_REMOTES.load(Ordering::SeqCst);
+            assert_ne!(assigned_mask & (1_u64 << 1), 0);
+            assert_ne!(assigned_mask & (1_u64 << 2), 0);
+            assert_eq!(TEST_USER_RESULTS.load(Ordering::SeqCst), 1);
+            assert_eq!(TEST_DECODE_FAILURES.load(Ordering::SeqCst), 1);
+        }
+
+        FAULT_PHASE.store(false, Ordering::SeqCst);
+        mpi_call!(world.barrier());
+        if rank == 0 {
+            mpi_call!(world.process_at_rank(1).send_with_tag(&[77_u8], 77));
+        } else if rank == 1 {
+            let (message, _) = mpi_call!(world.process_at_rank(0).receive_vec_with_tag::<u8>(77));
+            assert_eq!(message, vec![77]);
+        }
+        mpi_call!(world.barrier());
+
+        let reused = pmap(
+            &world,
+            &domain,
+            options,
+            (rank == 0).then(|| vec![3_i32, 1, 4]),
+            |item| Ok::<_, String>(item + 1),
+        )
+        .unwrap();
+        if rank == 0 {
+            assert_eq!(reused.unwrap(), vec![4, 2, 5]);
+            std::fs::remove_file(&assigned).unwrap();
+            std::fs::remove_file(&errored).unwrap();
+        }
+        mpi_call!(world.barrier());
     }
 }
 

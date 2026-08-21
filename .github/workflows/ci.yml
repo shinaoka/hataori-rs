@@ -1,0 +1,42 @@
+name: Core acceptance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install MSRV and non-Linux check target
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup target add x86_64-apple-darwin
+      - name: Install MPIwrapper build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake libclang-dev libopenmpi-dev openmpi-bin python3
+      - name: Build pinned MPIwrapper fixture
+        env:
+          MPIWRAPPER_COMMIT: 966f4231c96153a08295fc7d0bcbd65e916a73fd
+        run: |
+          git clone https://github.com/eschnett/MPIwrapper.git "$RUNNER_TEMP/MPIwrapper"
+          git -C "$RUNNER_TEMP/MPIwrapper" checkout --detach "$MPIWRAPPER_COMMIT"
+          cmake -S "$RUNNER_TEMP/MPIwrapper" -B "$RUNNER_TEMP/MPIwrapper/build" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/mpiwrapper-install"
+          cmake --build "$RUNNER_TEMP/MPIwrapper/build" --parallel 2
+          cmake --install "$RUNNER_TEMP/MPIwrapper/build"
+      - name: Run complete core matrix
+        run: |
+          scripts/check-core.sh \
+            "$RUNNER_TEMP/mpiwrapper-install/lib/libmpiwrapper.so" \
+            966f4231c96153a08295fc7d0bcbd65e916a73fd
