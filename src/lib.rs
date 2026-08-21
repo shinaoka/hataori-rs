@@ -5,6 +5,8 @@ mod domain;
 mod local;
 mod map;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
+mod scheduler;
+#[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 mod wire;
 
 pub use domain::{

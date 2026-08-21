@@ -128,3 +128,21 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - Non-blocking coverage notes (world-size decode guard and oversized-header decode branch) are deferred to the final Task #19 coverage audit; shared validation paths are already covered.
+
+### Task #14 — pure scheduler state machine
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Pre-implementation Round 1 verdict: **Changes requested**
+- Required design fixes: reject root dispatch while running without mutation; validate success completions even after failure; remove speculative separate `TaskId`; pin internal accessor/error-completion/extraction contracts and deterministic skew metric.
+- Fixes applied: P0 uses checked original indices as task keys and batch IDs from zero; root-running dispatch is a state-preserving error; all completion metadata is two-pass validated after failure and successful values are then discarded; readiness tests define exact skew and drain assertions.
+- Follow-up pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after timeout)
+- Follow-up pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable; parent completed integration/test repair after bounded timeouts)
+- Scope: private FIFO coordinator, root/remote capacity-one lanes, checked batches, transactional completions, failure/drain transitions, ordered extraction, deterministic skew tests
+- Integration corrections: fixed generic ownership moves, aligned tests to rank-aware completion APIs, replaced an invalid skew trace with real READY/completion scheduling, and removed lint-only test issues.
+- Integration verification: 13 scheduler tests pass under the runtime MPI feature; full feature/lint/doc matrix runs before push.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Reviewer-requested coverage added: duplicate and out-of-order completion metadata both return typed errors with state/results unchanged, then a valid retry succeeds.
+- `is_quiescent` is retained for Task #15 transport termination and must become a real consumer there.

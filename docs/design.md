@@ -247,8 +247,8 @@ READY(rank, domain=0)
     -> DRAIN
 ```
 
-- The root owns the queue of indexed items.
-- Batch size is a fixed positive call parameter; the default is 1.
+- The root owns a FIFO queue of indexed items. In fixed-input P0, the checked original input index is also the stable `task_key`; no separate task-ID field is transmitted.
+- Batch size is a fixed positive call parameter; the default is 1. Batch IDs start at zero and increase monotonically with checked overflow.
 - Each domain, including the root's, has `running <= 1` and `prefetched = 0`.
 - Every remote `READY` receives exactly one `TASK` or `STOP`.
 - `READY` supplies backpressure; P0 has no credit, acknowledgement, heartbeat, retry, cancellation, cost model, or adaptive batch policy.
@@ -256,7 +256,7 @@ READY(rank, domain=0)
 
 The root retains the input queue and result table, so the input plus all returned payloads must fit in root memory. P0 does not stream results to external storage.
 
-The root rank participates in computation through its own domain. The scheduler assigns it an owned batch directly, without a self-addressed MPI message or serialization. Root-local idleness acts like `READY`, and local completion makes the domain eligible for another batch. This keeps all ranks useful, including world size one, while preserving the same capacity and ordering rules as remote domains.
+The root rank participates in computation through its own domain. The scheduler assigns it an owned batch directly, without a self-addressed MPI message or serialization. Root-local idleness acts like `READY`, and local completion makes the domain eligible for another batch. Calling the root-dispatch transition while its lane is running is a typed protocol error and leaves state unchanged; only an idle root with no assignable work becomes stopped. This keeps all ranks useful, including world size one, while preserving the same capacity and ordering rules as remote domains.
 
 The MPI initialization thread drives all communication and the root scheduler. With Rayon, root uses `ThreadPool::in_place_scope`: its non-`Send` scope body stays on the calling MPI initialization thread, while `Scope::spawn` sends the borrowed callback task into the root's explicit pool. The task reports completion through a rank-local standard-library channel. This exact primitive, rather than `ThreadPool::scope` or `install`, preserves FUNNELED identity and scoped non-`'static` borrowing.
 
@@ -275,7 +275,7 @@ Idle -> ReadySent -> Running -> ResultSent -> Idle
 Idle -> ReadySent -> StopReceived -> Drained
 ```
 
-A successful or failed batch produces exactly one complete `RESULT` frame, followed by the normal `READY` path. `DRAIN` is sent exactly once, only after `STOP`, callback completion, and completion of every announced send. The root domain follows the same logical states without `READY`, `STOP`, or `DRAIN` MPI messages. A callback panic is not recoverable: under `panic=unwind` the callback boundary catches it only to request `MPI_Abort` from the initialization thread; under `panic=abort` the process terminates directly.
+A successful or failed batch produces exactly one complete `RESULT` frame, followed by the normal `READY` path. Completion always validates lane state, batch ID, count, and the exact original-index sequence, including after a prior failure. Validation is a full first pass: protocol errors leave the result table and lane state unchanged. On a valid success after failure, decoded values are discarded after validation; the lane still returns to idle and then follows `READY` to `STOP`. `DRAIN` is sent exactly once, only after `STOP`, callback completion, and completion of every announced send. The root domain follows the same logical states without `READY`, `STOP`, or `DRAIN` MPI messages. A callback panic is not recoverable: under `panic=unwind` the callback boundary catches it only to request `MPI_Abort` from the initialization thread; under `panic=abort` the process terminates directly.
 
 The coordinator is implemented as private pure state transitions over queue, in-flight, result, and rank-state data. Tests drive those transitions directly; P0 adds neither a public nor private generic transport trait. The MPI loop is a thin caller of that state machine.
 

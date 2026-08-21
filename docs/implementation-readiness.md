@@ -100,7 +100,7 @@ Both remain external blockers for the adapter only.
 1. **Crate and features** — single crate, dependency-free default, `rayon`, `mpi`, and pinned `rsmpi-rt`; reject both MPI features together.
 2. **Serial `map`** — ordered results, bounded callback errors, no serde/Send/Sync/`'static` leakage.
 3. **Domain and local Rayon** — managed/external ownership, RAII admission, `Sequential`/deterministic full-evaluation `Outer`/whole-domain `Inner`, typed `MapInError`, Linux affinity and non-Linux declared placement.
-4. **Pure protocol state and wire** — coordinator transitions, stable IDs, framing, checked codec, signed deterministic error keys; no transport trait.
+4. **Pure protocol state and wire** — FIFO coordinator transitions, zero-based checked batch IDs, original indices as P0 task keys, framing, checked codec, signed deterministic error keys; no transport trait or separate task-ID seam.
 5. **MPI-only `pmap`** — private communicator, collective preflight, dynamic scheduler, synchronous root participation, drain and reuse.
 6. **Hybrid `pmap`** — `in_place_scope`, local completion channel, fair `MPI_Iprobe` loop, rendezvous progress.
 7. **Collective placement helpers** — root-coordinated `broadcast`, `scatter`, and `gather` on the same private wire rules.
@@ -127,11 +127,11 @@ Commands become runnable when Step 1 creates `Cargo.toml`; they are merge gates 
 
 - empty input, world size one, ranks greater than items, batch one, and fixed batches greater than one;
 - reverse completion preserves input order and every successful index executes once;
-- skewed coarse workload beats a static contiguous partition without a benchmark framework;
-- trace assertions prove `running <= 1`, `prefetched = 0`, one complete result per batch, and one STOP/DRAIN per remote rank;
+- a deterministic skew fixture records each dynamic assignment, sums item costs per lane, and proves the maximum dynamic lane cost is strictly lower than the maximum static-contiguous lane cost for the same items;
+- trace assertions prove `running <= 1`, `prefetched = 0`, one complete result per batch, and one STOP/DRAIN per remote rank; root dispatch while running is a state-preserving typed error;
 - preflight mismatch emits no scheduler traffic, and a largest possible error key at or above `i64::MAX` returns the typed preflight failure;
 - version, kind, source/tag, length/count, overflow, truncation, and trailing-byte failures are typed;
-- simultaneous user/wire failures select one signed deterministic key on every rank;
+- simultaneous user/wire failures select one signed deterministic key on every rank; after failure, every assigned completion is fully validated, valid values are discarded, and malformed metadata leaves state/results unchanged;
 - recoverable failure leaves the caller communicator reusable and no private frame unmatched;
 - root-local codec instrumentation remains zero for `pmap`, `broadcast`, `scatter`, and `gather`;
 - serial `map` and Rayon `Sequential`/`Inner` stop at the first callback error, while Rayon `Outer` evaluates every input exactly once and reports the lowest failed index after ordered collection;
