@@ -332,13 +332,35 @@ Core transports only opaque serializable `T` and `U` values or bytes. Tensor sha
 
 ## 11. Data placement helpers
 
-P0 provides three synchronous collective, root-coordinated helpers that reuse the same private-communicator, wire, preflight, and error rules. All ranks call each helper in the same collective order:
+P0 provides three synchronous collective, root-coordinated helpers that reuse the same private-communicator, wire, preflight, and deterministic error-convergence rules. All ranks call each helper in the same collective order:
 
-- `broadcast`: copy one root-owned value to every rank;
-- `scatter`: distribute rank-local owned shards;
-- `gather`: collect one rank-local owned value from every rank.
+```rust
+pub fn broadcast<C, T>(
+    world: &C,
+    root: i32,
+    root_value: Option<T>,
+) -> Result<T, PlacementError>;
 
-Returned values are caller-owned. The root's same-rank contribution is always an owned move and never enters the codec for any helper. P0 has no remote registry, cross-call object cache, remote references, or distributed garbage collector.
+pub fn scatter<C, T>(
+    world: &C,
+    root: i32,
+    root_shards: Option<Vec<T>>,
+) -> Result<T, PlacementError>;
+
+pub fn gather<C, T>(
+    world: &C,
+    root: i32,
+    value: T,
+) -> Result<Option<Vec<T>>, PlacementError>;
+```
+
+`C` is the selected backend's `Communicator`; `T: Serialize + DeserializeOwned`. `PlacementErrorKind` has only `Preflight`, `Wire`, and `Protocol`. `PlacementError` exposes its kind, the lowest reporting rank when applicable, and a message bounded by the common 4096-byte limit.
+
+Preflight collectively agrees on an in-range root and operation kind. Exactly the root supplies `Some` to `broadcast`/`scatter`; scatter additionally requires exactly `world.size()` shards. Before scheduler traffic, every payload that its source must encode is encoded and checked against wire/MPI limits: broadcast/scatter encode remote root values, while gather encodes only non-root values. Encode failures converge before any point-to-point frame.
+
+Transport uses one private communicator and dedicated checked placement message kinds. Every announced frame is fully received even when header/payload decoding fails, so no sender remains blocked. Broadcast/scatter receivers and the gather root finish their fixed receive schedule before a final signed minimum-rank convergence and bounded winner-message broadcast. Unexpected internal MPI/transport failures that cannot be drained use `MPI_Abort`; ordinary codec/protocol failures return the same converged `PlacementError` on every rank.
+
+Returned values are caller-owned and gather order is rank order. The root's local broadcast output, scatter shard, and gather contribution are owned moves rather than codec round trips; the broadcast source may still be serialized by reference to create remote copies. World size one performs no encode/decode and therefore exercises the pure owned-move path. P0 has no remote registry, cross-call object cache, remote references, or distributed garbage collector.
 
 ## 12. Trait bounds
 
@@ -350,6 +372,7 @@ P0 uses scoped synchronous execution and does not add `'static` for hypothetical
 | Rayon `map_in` | `T/U/E: Send`; `F: Fn(T) -> Result<U, E> + Send + Sync`; `E: Display`; no `'static` |
 | MPI-only `pmap` | `T/U: Serialize + DeserializeOwned`; `F: FnMut(T) -> Result<U, E>`; `E: Display`; no `Send`, `Sync`, or `'static` |
 | hybrid `pmap` | MPI bounds plus `T/U/E: Send`; `F: Fn(T) -> Result<U, E> + Send + Sync`; no `'static` |
+| `broadcast` / `scatter` / `gather` | `T: Serialize + DeserializeOwned`; no Rayon, `Send`, `Sync`, or `'static` bounds |
 
 `E` is moved from a worker and does not require `Sync`. Shared-data APIs add `Sync` only where actual sharing requires it.
 

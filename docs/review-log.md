@@ -198,3 +198,16 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - Reviewer-requested hardening: added a focused disconnected-local-sender test proving the chooser selects the abort path immediately.
+
+### Task #18 — collective placement helpers
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; bounded retry after repository timeout)
+- Pre-implementation verdict: **Correct-to-merge**
+- Pinned implementation requirements: all helpers execute the identical preflight sequence before branching; scatter ownership uses `Vec<Option<T>>` and `take` without cloning; each planned receive drains header and actual payload before validation; no `?` return occurs between collective phases; lowest reporting rank owns the bounded converged error.
+- Implementer: Luna (high, write-capable; bounded timeout after initial placement/wire slice), with parent completion of convergence, ownership, drain-safe decoding, exports, shared backend smoke, and watchdog integration.
+- Scope: public `broadcast`/`scatter`/`gather`, `PlacementError`, dedicated checked wire kinds, private communicator isolation, pre-encode and post-transport convergence, rank-order gather, root owned-move bypass.
+- Integration corrections: removed duplicate receives/decodes, made gather encode/decode failures participate in the same phase on every rank, retained the first root decode failure while draining all sources, and broadcast bounded error bytes rather than mutating a `String` buffer.
+- Verification: both backends n=1/2/4, arbitrary roots, operation/root/shape mismatch, pretraffic encode and postdrain decode errors, original-communicator tag isolation, empty/UTF-8/2 MiB/reuse, size-one unencodable and non-`Send` owned values, watchdog, feature+Rayon compile matrix.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; final bounded evidence retry after repository-read timeouts)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none

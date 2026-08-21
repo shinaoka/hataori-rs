@@ -5,6 +5,8 @@ mod domain;
 mod local;
 mod map;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
+mod placement;
+#[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 mod pmap;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 mod scheduler;
@@ -20,6 +22,8 @@ pub use domain::{DomainBuildError, PlacementStatus, PoolOwnership};
 #[cfg(feature = "rayon")]
 pub use local::{map_in, MapInError};
 pub use map::{map, MapError};
+#[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
+pub use placement::{broadcast, gather, scatter, PlacementError, PlacementErrorKind};
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 pub use pmap::{pmap, PmapError, PmapErrorKind, PmapOptions};
 

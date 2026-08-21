@@ -15,6 +15,9 @@ pub(crate) enum MessageKind {
     Result,
     Stop,
     Drain,
+    Broadcast,
+    Scatter,
+    Gather,
 }
 
 impl MessageKind {
@@ -25,6 +28,9 @@ impl MessageKind {
             Self::Result => 2,
             Self::Stop => 3,
             Self::Drain => 4,
+            Self::Broadcast => 5,
+            Self::Scatter => 6,
+            Self::Gather => 7,
         }
     }
 }
@@ -39,6 +45,9 @@ impl TryFrom<u8> for MessageKind {
             2 => Ok(Self::Result),
             3 => Ok(Self::Stop),
             4 => Ok(Self::Drain),
+            5 => Ok(Self::Broadcast),
+            6 => Ok(Self::Scatter),
+            7 => Ok(Self::Gather),
             value => Err(WireError::InvalidKind(value)),
         }
     }
@@ -168,9 +177,13 @@ impl Header {
 
 fn validate_status(kind: MessageKind, status: MessageStatus) -> Result<(), WireError> {
     let valid = match kind {
-        MessageKind::Ready | MessageKind::Task | MessageKind::Stop | MessageKind::Drain => {
-            status == MessageStatus::None
-        }
+        MessageKind::Ready
+        | MessageKind::Task
+        | MessageKind::Stop
+        | MessageKind::Drain
+        | MessageKind::Broadcast
+        | MessageKind::Scatter
+        | MessageKind::Gather => status == MessageStatus::None,
         MessageKind::Result => matches!(status, MessageStatus::Ok | MessageStatus::Error),
     };
     valid
