@@ -129,9 +129,9 @@ Commands become runnable when Step 1 creates `Cargo.toml`; they are merge gates 
 - reverse completion preserves input order and every successful index executes once;
 - a deterministic skew fixture records each dynamic assignment, sums item costs per lane, and proves the maximum dynamic lane cost is strictly lower than the maximum static-contiguous lane cost for the same items;
 - trace assertions prove `running <= 1`, `prefetched = 0`, one complete result per batch, and one STOP/DRAIN per remote rank; root dispatch while running is a state-preserving typed error;
-- preflight mismatch emits no scheduler traffic, and a largest possible error key at or above `i64::MAX` returns the typed preflight failure;
+- preflight mismatch or an agreed root outside `[0, world_size)` emits no scheduler traffic, and a largest possible error key at or above `i64::MAX` returns the typed preflight failure;
 - version, kind, source/tag, length/count, overflow, truncation, and trailing-byte failures are typed;
-- simultaneous user/wire failures select one signed deterministic key on every rank; after failure, every assigned completion is fully validated, valid values are discarded, and malformed metadata leaves state/results unchanged;
+- simultaneous user/wire failures select one signed deterministic key on every rank; after failure, every assigned completion is fully validated, valid values are discarded, and malformed metadata leaves state/results unchanged; a corrupt received batch ID releases the running lane only through its coordinator-pinned batch metadata before the next READY→STOP;
 - recoverable failure leaves the caller communicator reusable and no private frame unmatched;
 - root-local codec instrumentation remains zero for `pmap`, `broadcast`, `scatter`, and `gather`;
 - serial `map` and Rayon `Sequential`/`Inner` stop at the first callback error, while Rayon `Outer` evaluates every input exactly once and reports the lowest failed index after ordered collection;

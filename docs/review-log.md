@@ -146,3 +146,22 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Blocking findings: none
 - Reviewer-requested coverage added: duplicate and out-of-order completion metadata both return typed errors with state/results unchanged, then a valid retry succeeds.
 - `is_quiescent` is retained for Task #15 transport termination and must become a real consumer there.
+
+### Task #15 — upstream MPI-only `pmap`
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after timeout)
+- Pre-implementation Round 1 verdict: **Changes requested**
+- Required design fixes: reject an agreed root outside the communicator range; release a running lane after corrupt completion metadata using coordinator-pinned batch state rather than the untrusted received batch ID.
+- Fixes applied: preflight now validates `0 <= root < world_size`; scheduler/transport contract adds dedicated root/remote protocol-error completion transitions that derive the batch ID from `RunningMeta`, mark failure, clear pending, and return the lane to idle for READY→STOP.
+- Follow-up pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; two bounded retries after tool timeouts)
+- Follow-up pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable; parent completed production integration after repeated bounded timeouts)
+- Scope: public MPI-only `pmap`, private communicator/preflight, blocking worker/root loops, scheduler protocol-error release, signed winner convergence, and MPI smoke example
+- Integration corrections: fixed root fairness and failed-result extraction; kept remote candidates owned by reporting workers; winner rank now broadcasts class/key/message; added domain admission/thread-main/root-range preflight; added callback abort path, protocol-error reporting, and scheduler consumer visibility.
+- Integration verification: upstream MPI library tests/clippy and mpiexec smoke at n=1/2/4 pass; full matrix runs before push.
+- Post-implementation Round 1 verdict: **Changes requested**
+- Blocking fix: every post-preflight `root_loop`/`worker_loop` error now calls private-communicator `MPI_Abort(72)` and every convergence-broadcast defensive failure calls `MPI_Abort(73)`, so no rank returns while peers remain in blocking transport/collectives.
+- Follow-up post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after tool-budget stop)
+- Follow-up post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking future hardening: Task #19 must inject malformed frames and verify recoverable in-band paths where promised; unexpected non-folded paths are deliberately abort-only.

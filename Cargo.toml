@@ -20,3 +20,7 @@ bincode = { version = "2", default-features = false, features = ["serde", "std"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
+
+[[example]]
+name = "mpi_pmap_smoke"
+required-features = ["mpi"]

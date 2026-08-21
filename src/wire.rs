@@ -1,6 +1,6 @@
-#![allow(
-    dead_code,
-    reason = "wire primitives precede their scheduler and MPI transport consumers"
+#![cfg_attr(
+    feature = "rayon",
+    allow(dead_code, reason = "Task #17 consumes wire primitives in hybrid pmap")
 )]
 
 use crate::map::truncate_message;
@@ -150,6 +150,7 @@ impl Header {
         })
     }
 
+    #[cfg(test)]
     pub(crate) const fn version(self) -> u16 {
         self.version
     }
@@ -234,6 +235,7 @@ pub(crate) fn checked_usize_length(value: u64) -> Result<usize, WireError> {
 pub(crate) enum ErrorClass {
     WireProtocol,
     Callback,
+    #[allow(dead_code, reason = "Task #19 drain-fault convergence uses this class")]
     Drain,
 }
 
@@ -275,6 +277,7 @@ impl ErrorKey {
         self.0
     }
 
+    #[cfg(test)]
     pub(crate) fn checked_reporting_rank(self, world_size: i32) -> Result<i32, WireError> {
         if world_size <= 0 {
             return Err(WireError::InvalidWorldSize { world_size });
@@ -346,6 +349,7 @@ pub(crate) enum WireError {
         world_size: i32,
     },
     ErrorKeyOverflow,
+    #[cfg(test)]
     NoErrorKey,
 }
 
@@ -400,6 +404,7 @@ impl fmt::Display for WireError {
                 "invalid MPI rank {rank} for world size {world_size}"
             ),
             Self::ErrorKeyOverflow => formatter.write_str("deterministic error key overflows i64"),
+            #[cfg(test)]
             Self::NoErrorKey => formatter.write_str("no-error key has no reporting rank"),
         }
     }

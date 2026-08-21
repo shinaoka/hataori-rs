@@ -1,6 +1,6 @@
-#![allow(
-    dead_code,
-    reason = "pure scheduler state precedes its Task #15 MPI transport consumer"
+#![cfg_attr(
+    feature = "rayon",
+    allow(dead_code, reason = "Task #17 consumes scheduler state in hybrid pmap")
 )]
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -8,13 +8,17 @@ use std::fmt;
 use std::num::NonZeroUsize;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct BatchId(u64);
+pub(crate) struct BatchId(u64);
 
 impl BatchId {
     const ZERO: Self = Self(0);
 
-    const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
+    }
+
+    pub(crate) const fn from_raw(value: u64) -> Self {
+        Self(value)
     }
 
     fn checked_increment(self) -> Result<Self, SchedulerError> {
@@ -25,7 +29,7 @@ impl BatchId {
     }
 }
 
-struct ScheduledItem<T> {
+pub(crate) struct ScheduledItem<T> {
     original_index: usize,
     value: T,
 }
@@ -38,75 +42,77 @@ impl<T> ScheduledItem<T> {
         }
     }
 
-    fn original_index(&self) -> usize {
+    pub(crate) fn original_index(&self) -> usize {
         self.original_index
     }
 
-    fn into_value(self) -> T {
+    pub(crate) fn into_value(self) -> T {
         self.value
     }
 }
 
-struct Batch<T> {
+pub(crate) struct Batch<T> {
     id: BatchId,
     items: Vec<ScheduledItem<T>>,
 }
 
 impl<T> Batch<T> {
-    fn id(&self) -> BatchId {
+    pub(crate) fn id(&self) -> BatchId {
         self.id
     }
 
-    fn into_items(self) -> Vec<ScheduledItem<T>> {
+    pub(crate) fn into_items(self) -> Vec<ScheduledItem<T>> {
         self.items
     }
 }
 
-struct ItemResult<U> {
+pub(crate) struct ItemResult<U> {
     original_index: usize,
     value: U,
 }
 
 impl<U> ItemResult<U> {
-    fn new(original_index: usize, value: U) -> Self {
+    pub(crate) fn new(original_index: usize, value: U) -> Self {
         Self {
             original_index,
             value,
         }
     }
 
-    fn original_index(&self) -> usize {
+    pub(crate) fn original_index(&self) -> usize {
         self.original_index
     }
 
-    fn into_value(self) -> U {
+    pub(crate) fn into_value(self) -> U {
         self.value
     }
 }
 
-enum Dispatch<T> {
+pub(crate) enum Dispatch<T> {
     Task(Batch<T>),
     Stop,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum Lane {
+pub(crate) enum Lane {
     Root,
     Remote(i32),
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-struct CompletionMeta {
+pub(crate) struct CompletionMeta {
     lane: Lane,
     batch_id: BatchId,
 }
 
 impl CompletionMeta {
-    const fn lane(self) -> Lane {
+    #[cfg(test)]
+    pub(crate) const fn lane(self) -> Lane {
         self.lane
     }
 
-    const fn batch_id(self) -> BatchId {
+    #[cfg(test)]
+    pub(crate) const fn batch_id(self) -> BatchId {
         self.batch_id
     }
 }
@@ -143,7 +149,7 @@ impl LaneState {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum SchedulerError {
+pub(crate) enum SchedulerError {
     InvalidRoot,
     InvalidRemote,
     DuplicateRemote,
@@ -190,7 +196,7 @@ impl fmt::Display for SchedulerError {
 
 impl std::error::Error for SchedulerError {}
 
-struct Coordinator<T, U> {
+pub(crate) struct Coordinator<T, U> {
     pending: VecDeque<ScheduledItem<T>>,
     ordered: Vec<Option<U>>,
     batch_size: NonZeroUsize,
@@ -201,7 +207,7 @@ struct Coordinator<T, U> {
 }
 
 impl<T, U> Coordinator<T, U> {
-    fn new(
+    pub(crate) fn new(
         root_rank: i32,
         remote_ranks: Vec<i32>,
         items: Vec<T>,
@@ -242,7 +248,7 @@ impl<T, U> Coordinator<T, U> {
         })
     }
 
-    fn on_remote_ready(&mut self, rank: i32) -> Result<Dispatch<T>, SchedulerError> {
+    pub(crate) fn on_remote_ready(&mut self, rank: i32) -> Result<Dispatch<T>, SchedulerError> {
         let state = self.remotes.get(&rank).ok_or(SchedulerError::UnknownRank)?;
         if state.kind() != LaneStateKind::Idle {
             return Err(SchedulerError::WrongLaneState);
@@ -259,7 +265,7 @@ impl<T, U> Coordinator<T, U> {
         Ok(Dispatch::Task(batch))
     }
 
-    fn next_root_batch(&mut self) -> Result<Option<Batch<T>>, SchedulerError> {
+    pub(crate) fn next_root_batch(&mut self) -> Result<Option<Batch<T>>, SchedulerError> {
         if self.root.kind() == LaneStateKind::Running {
             return Err(SchedulerError::WrongLaneState);
         }
@@ -277,7 +283,7 @@ impl<T, U> Coordinator<T, U> {
         Ok(Some(batch))
     }
 
-    fn on_root_success(
+    pub(crate) fn on_root_success(
         &mut self,
         batch_id: BatchId,
         results: Vec<ItemResult<U>>,
@@ -301,7 +307,7 @@ impl<T, U> Coordinator<T, U> {
         Ok(completion)
     }
 
-    fn on_remote_success(
+    pub(crate) fn on_remote_success(
         &mut self,
         rank: i32,
         batch_id: BatchId,
@@ -327,7 +333,10 @@ impl<T, U> Coordinator<T, U> {
         Ok(completion)
     }
 
-    fn on_root_error(&mut self, batch_id: BatchId) -> Result<CompletionMeta, SchedulerError> {
+    pub(crate) fn on_root_error(
+        &mut self,
+        batch_id: BatchId,
+    ) -> Result<CompletionMeta, SchedulerError> {
         let metadata = match &self.root {
             LaneState::Running(metadata) => metadata,
             _ => return Err(SchedulerError::WrongLaneState),
@@ -344,7 +353,7 @@ impl<T, U> Coordinator<T, U> {
         })
     }
 
-    fn on_remote_error(
+    pub(crate) fn on_remote_error(
         &mut self,
         rank: i32,
         batch_id: BatchId,
@@ -366,12 +375,31 @@ impl<T, U> Coordinator<T, U> {
         })
     }
 
-    fn fail(&mut self) {
+    pub(crate) fn on_remote_protocol_error(
+        &mut self,
+        rank: i32,
+    ) -> Result<CompletionMeta, SchedulerError> {
+        let batch_id = match self.remotes.get(&rank) {
+            Some(LaneState::Running(metadata)) => metadata.batch_id,
+            Some(_) => return Err(SchedulerError::WrongLaneState),
+            None => return Err(SchedulerError::UnknownRank),
+        };
+        self.remotes.insert(rank, LaneState::Idle);
+        self.failed = true;
+        self.pending.clear();
+        Ok(CompletionMeta {
+            lane: Lane::Remote(rank),
+            batch_id,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail(&mut self) {
         self.failed = true;
         self.pending.clear();
     }
 
-    fn on_remote_drain(&mut self, rank: i32) -> Result<(), SchedulerError> {
+    pub(crate) fn on_remote_drain(&mut self, rank: i32) -> Result<(), SchedulerError> {
         let state = self.remotes.get(&rank).ok_or(SchedulerError::UnknownRank)?;
         if state.kind() != LaneStateKind::Stopped {
             return Err(SchedulerError::WrongLaneState);
@@ -380,11 +408,11 @@ impl<T, U> Coordinator<T, U> {
         Ok(())
     }
 
-    fn is_quiescent(&self) -> bool {
+    pub(crate) fn is_quiescent(&self) -> bool {
         self.pending.is_empty() && self.running_count() == 0
     }
 
-    fn is_finished(&self) -> bool {
+    pub(crate) fn is_finished(&self) -> bool {
         self.root.kind() == LaneStateKind::Stopped
             && self
                 .remotes
@@ -393,7 +421,7 @@ impl<T, U> Coordinator<T, U> {
             && self.running_count() == 0
     }
 
-    fn into_results(self) -> Result<Vec<U>, SchedulerError> {
+    pub(crate) fn into_results(self) -> Result<Vec<U>, SchedulerError> {
         if self.failed {
             return Err(SchedulerError::Failed);
         }
@@ -406,6 +434,7 @@ impl<T, U> Coordinator<T, U> {
             .collect()
     }
 
+    #[cfg(test)]
     fn pending_count(&self) -> usize {
         self.pending.len()
     }
@@ -419,6 +448,7 @@ impl<T, U> Coordinator<T, U> {
                 .count()
     }
 
+    #[cfg(test)]
     fn result_count(&self) -> usize {
         self.ordered
             .iter()
@@ -426,7 +456,7 @@ impl<T, U> Coordinator<T, U> {
             .count()
     }
 
-    fn failed(&self) -> bool {
+    pub(crate) fn failed(&self) -> bool {
         self.failed
     }
 
@@ -810,6 +840,28 @@ mod tests {
             coordinator.into_results().unwrap_err(),
             SchedulerError::Failed
         );
+    }
+
+    #[test]
+    fn protocol_error_uses_pinned_batch_and_preserves_invalid_state() {
+        let mut coordinator = Coordinator::<i32, ()>::new(0, vec![1], vec![1], one()).unwrap();
+        assert_eq!(
+            coordinator.on_remote_protocol_error(1).unwrap_err(),
+            SchedulerError::WrongLaneState
+        );
+        let batch = batch(coordinator.on_remote_ready(1).unwrap());
+        let completion = coordinator.on_remote_protocol_error(1).unwrap();
+        assert_eq!(completion.batch_id(), batch.id());
+        assert!(coordinator.failed());
+        assert_eq!(coordinator.pending_count(), 0);
+        assert_eq!(
+            coordinator.on_remote_protocol_error(1).unwrap_err(),
+            SchedulerError::WrongLaneState
+        );
+        assert!(matches!(
+            coordinator.on_remote_ready(1).unwrap(),
+            Dispatch::Stop
+        ));
     }
 
     #[test]

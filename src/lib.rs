@@ -4,6 +4,8 @@ mod domain;
 #[cfg(feature = "rayon")]
 mod local;
 mod map;
+#[cfg(all(any(feature = "mpi", feature = "rsmpi-rt"), not(feature = "rayon")))]
+mod pmap;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 mod scheduler;
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
@@ -18,6 +20,8 @@ pub use domain::{DomainBuildError, PlacementStatus, PoolOwnership};
 #[cfg(feature = "rayon")]
 pub use local::{map_in, MapInError};
 pub use map::{map, MapError};
+#[cfg(all(any(feature = "mpi", feature = "rsmpi-rt"), not(feature = "rayon")))]
+pub use pmap::{pmap, PmapError, PmapErrorKind, PmapOptions};
 
 #[cfg(all(feature = "mpi", feature = "rsmpi-rt"))]
 compile_error!("hataori: features `mpi` and `rsmpi-rt` are mutually exclusive");
