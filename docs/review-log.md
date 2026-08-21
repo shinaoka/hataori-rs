@@ -165,3 +165,18 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Follow-up post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - Non-blocking future hardening: Task #19 must inject malformed frames and verify recoverable in-band paths where promised; unexpected non-folded paths are deliberately abort-only.
+
+### Task #16 — `rsmpi-rt` backend parity
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after timeout)
+- Pre-implementation Round 1 verdict: **Changes requested**
+- Clarification/fixes: Task #16 is MPI-only runtime parity; Task #17 owns `rsmpi-rt,rayon` hybrid pmap. A checked script must poison build-time MPI/C tool discovery, prove dependency-tree exclusion, build the runtime example, use an absolute per-rank `MPI_RT_LIB`, run n=1/2/4 with whole-process-group timeout, and prove invalid/unset library fails without fallback. MPIwrapper fixture commit is recorded before execution.
+- Follow-up pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable; parent integrated the runtime fixture script and upstream pin)
+- Scope: runtime-only smoke example, poisoned no-system-MPI build/dependency-tree gate, negative loader checks, and shared-implementation parity at n=1/2/4
+- Upstream blocker found by the acceptance gate: pinned `rsmpi-rt` loaded MPIABI data objects incorrectly, resolved native `MPI_*` dependencies instead of `MPIABI_*`/`MPIXABI_*` adapters, and used the wrong LP64 `MPI_Status` size/alignment. The separately gated upstream fix merged as `tensor4all/rsmpi-rt#6`, commit `6db6a2d6f96115b17c9a925e53ce719797c15dbb`, after all ten CI checks passed.
+- Runtime fixture: MPIwrapper commit `966f4231c96153a08295fc7d0bcbd65e916a73fd`.
+- Integration verification: poisoned fresh-target check/build and dependency exclusion pass; unset/invalid `MPI_RT_LIB` fail without fallback; runtime pmap smoke passes under `mpiexec` n=1/2/4 with empty input, batch size two, ordering, converged user error, and reuse.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; bounded retry after tool timeout)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none

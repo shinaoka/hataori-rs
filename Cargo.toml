@@ -14,7 +14,7 @@ rsmpi-rt = ["dep:mpi-runtime", "dep:serde", "dep:bincode"]
 [dependencies]
 rayon = { version = "1.10", optional = true }
 mpi-upstream = { package = "mpi", version = "=0.8.1", default-features = false, optional = true }
-mpi-runtime = { package = "mpi", git = "https://github.com/tensor4all/rsmpi-rt", rev = "065cc7622c6ad72b6bcbc808296aaf597ff56b70", default-features = false, features = ["mpi-rt-sys-backend"], optional = true }
+mpi-runtime = { package = "mpi", git = "https://github.com/tensor4all/rsmpi-rt", rev = "6db6a2d6f96115b17c9a925e53ce719797c15dbb", default-features = false, features = ["mpi-rt-sys-backend"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "2", default-features = false, features = ["serde", "std"], optional = true }
 
@@ -24,3 +24,7 @@ libc = { version = "0.2", optional = true }
 [[example]]
 name = "mpi_pmap_smoke"
 required-features = ["mpi"]
+
+[[example]]
+name = "rsmpi_rt_pmap_smoke"
+required-features = ["rsmpi-rt"]

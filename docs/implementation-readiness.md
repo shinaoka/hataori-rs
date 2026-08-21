@@ -28,7 +28,7 @@ Core implementation and release do not wait for the tensor adapter. Integrated t
 | Unsigned `MPI_MIN` portability bug | Error keys use checked nonnegative `i64` and `MPI_INT64_T`/`MPI_MIN`; preflight uses signed rank reduction. |
 | Non-Linux strict affinity impossible | Linux placement is verified; non-Linux managed placement is explicitly degraded and `CallerDeclared`. |
 | Scheduler testability vs. transport abstraction | Coordinator transitions are private pure state, tested directly. No generic transport trait is added. |
-| `rsmpi-rt` API/pin uncertainty | Pin `065cc7622c6ad72b6bcbc808296aaf597ff56b70`; compile evidence is recorded below. |
+| `rsmpi-rt` API/pin uncertainty | Pin `6db6a2d6f96115b17c9a925e53ce719797c15dbb`; compile and runtime evidence is recorded below. |
 | Root memory and task granularity | Root-memory residency and coarse-task assumptions are explicit. |
 | Preflight no-error and error-key overflow | Passing ranks contribute `world_size`; largest-key overflow is a typed preflight failure. |
 | MPI public trait ambiguity | `Communicator` is explicitly the selected rsmpi dependency trait; core adds no transport trait and lists the used surface. |
@@ -50,7 +50,7 @@ Hataori declares Rust 1.85 as its initial MSRV because fixed bincode 2.0.1 requi
 Pinned revision:
 
 ```text
-065cc7622c6ad72b6bcbc808296aaf597ff56b70
+6db6a2d6f96115b17c9a925e53ce719797c15dbb
 ```
 
 Verified against that revision:

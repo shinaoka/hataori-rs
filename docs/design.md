@@ -49,7 +49,7 @@ Hataori uses standard-library collections, synchronization, channels, and errors
 `mpi` and `rsmpi-rt` provide the same Hataori API and are mutually exclusive. Enabling both is a compile error. Cargo features are additive, so every crate in one final dependency graph must select the same Hataori MPI backend; adapter crates forward these features rather than choosing a backend internally.
 
 - `mpi` pins upstream `mpi = "=0.8.1"` with `default-features = false`; its mandatory build/link-time `mpi-sys` backend remains active while `user-operations`, `derive`, and `complex` stay disabled.
-- `rsmpi-rt` uses the API-compatible rsmpi v0.8.1 fork at revision `065cc7622c6ad72b6bcbc808296aaf597ff56b70`, with `default-features = false` and only `mpi-rt-sys-backend`. Moving the pin requires the same compile and multi-rank gates as the initial pin.
+- `rsmpi-rt` uses the API-compatible rsmpi v0.8.1 fork at revision `6db6a2d6f96115b17c9a925e53ce719797c15dbb`, with `default-features = false` and only `mpi-rt-sys-backend`. Moving the pin requires the same compile and multi-rank gates as the initial pin.
 - Hataori does not enable rsmpi's optional `user-operations`, `derive`, or `complex` features. P0 needs only built-in MPI operations and manually encoded protocol headers.
 - A tiny private module aliases the selected crate as the MPI backend. Hataori does not introduce a public transport trait solely to hide two API-compatible implementations.
 
@@ -446,7 +446,7 @@ Backend-specific errors do not enter the core error enum.
 - No communicator or backend receives an unsafe thread-safety wrapper.
 - Core's feature matrix builds without tenferro or tensor4all in its dependency tree.
 - Default and Rayon-only builds contain no MPI, serde, or bincode dependency.
-- `mpi` and pinned `rsmpi-rt` revision `065cc7622c6ad72b6bcbc808296aaf597ff56b70` each build the same Hataori MPI API; enabling both fails at compile time.
+- `mpi` and pinned `rsmpi-rt` revision `6db6a2d6f96115b17c9a925e53ce719797c15dbb` each build the same Hataori MPI API; enabling both fails at compile time.
 - An `rsmpi-rt` build succeeds without MPI headers, a C compiler, or libclang, then passes a multi-rank smoke test with `MPI_RT_LIB` set.
 - Hataori can use a caller-supplied communicator without owning MPI initialization/finalization.
 
