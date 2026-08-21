@@ -40,6 +40,8 @@ Core implementation and release do not wait for the tensor adapter. Integrated t
 
 The `mpi` backend pins crates.io `mpi = "=0.8.1"` with `default-features = false`. In that release `mpi-sys` is mandatory, while the default feature only adds `user-operations`; disabling defaults therefore keeps the normal build/link-time backend and removes `libffi`. `derive` and `complex` remain disabled.
 
+Hataori declares Rust 1.85 as its initial MSRV because fixed bincode 2.0.1 requires 1.85; the complete Task #9 feature matrix was checked with Rust 1.85.0. Rayon resolves to 1.12.0 and remains within that bound.
+
 ### rsmpi-rt
 
 Pinned revision:

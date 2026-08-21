@@ -54,6 +54,20 @@
 - Verdict: **Correct-to-merge**
 - Gate status: **COMPLETE — core implementation may start**
 
-## Post-implementation review
+## Implementation task reviews
 
-Each independently mergeable implementation step in `docs/implementation-readiness.md` receives its own post-diff review by the selected different-family reviewer. No implementation diff exists yet.
+Each independently mergeable implementation step in `docs/implementation-readiness.md` receives its own post-diff review by the selected different-family reviewer.
+
+### Task #9 — crate and feature matrix
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable)
+- Scope: `.gitignore`, `Cargo.toml`, minimal `src/lib.rs`, and related status/evidence documentation
+- Pre-review refinements applied: defer `libc` to the affinity task; ignore library `Cargo.lock`; keep distinct MPI dependency keys; assert the exact exclusivity diagnostic; enumerate valid feature sets instead of `--all-features`.
+- Integration corrections: set honest MSRV 1.85 after dependency evidence; disable bincode's unused derive default; make backend aliases mutually exclusive so the both-feature build reports only Hataori's intended error; ignore local `.codegraph/` state.
+- Verification: default, Rayon, upstream MPI, runtime MPI, and both hybrid checks/tests/clippy/docs passed; Rust 1.85.0 check passed for all six valid feature sets; default and Rayon dependency boundaries passed; no tenferro/tensor4all dependency; exact mutual-exclusion diagnostic passed. Upstream MPI on this host required `BINDGEN_EXTRA_CLANG_ARGS=-I$(gcc -print-file-name=include)` because the installed libclang lacks builtin `stddef.h` discovery.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after initial tool-budget stop)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking deferral: choose and add project license metadata/files before any crates.io publication; Task #9 does not publish.
