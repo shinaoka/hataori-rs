@@ -1,5 +1,9 @@
 //! Hataori: synchronous serial, Rayon, and MPI data-parallel execution.
 
+mod map;
+
+pub use map::{map, MapError};
+
 #[cfg(all(feature = "mpi", feature = "rsmpi-rt"))]
 compile_error!("hataori: features `mpi` and `rsmpi-rt` are mutually exclusive");
 

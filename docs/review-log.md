@@ -71,3 +71,16 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - Non-blocking deferral: choose and add project license metadata/files before any crates.io publication; Task #9 does not publish.
+
+### Task #10 — serial `map`
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable)
+- Scope: unconditional serial `map`, non-generic `MapError`, bounded UTF-8 message handling, rustdoc, and focused tests
+- Pre-review refinements applied: derive `Debug`; fix accessor signatures; document zero-based/stop/drop/bounds behavior; avoid post-1.85 UTF-8 APIs; test exactly-once, boundary straddle, and non-`Send` borrowed types/state.
+- Integration verification: default tests and doctest pass on current and Rust 1.85; all feature-set gates are run before push.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking note: the crate-visible 4096-byte cap is retained for later `PmapError` reuse.
