@@ -4,6 +4,8 @@ mod domain;
 #[cfg(feature = "rayon")]
 mod local;
 mod map;
+#[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
+mod wire;
 
 pub use domain::{
     Domain, DomainAdmission, DomainBusy, DomainId, LocalMode, NegativeRank, Place,

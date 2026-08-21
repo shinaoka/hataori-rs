@@ -40,7 +40,7 @@ impl Display for MapError {
 
 impl std::error::Error for MapError {}
 
-fn truncate_message(mut message: String) -> String {
+pub(crate) fn truncate_message(mut message: String) -> String {
     if message.len() > MAX_ERROR_MESSAGE_BYTES {
         let mut end = MAX_ERROR_MESSAGE_BYTES;
         while !message.is_char_boundary(end) {

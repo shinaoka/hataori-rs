@@ -319,7 +319,7 @@ bincode::config::standard()
     .with_little_endian()
 ```
 
-Each message uses a fixed header tag followed, when nonempty, by one payload tag from the same source on the private communicator. The fixed-width header contains protocol version, message kind, batch ID, item count, status, and `u64` payload length. Capacity one means a rank never has two payloads outstanding. Receivers first match the header, then receive exactly its announced payload from that source; no wildcard payload receive is allowed.
+Each message uses a fixed header tag followed, when nonempty, by one payload tag from the same source on the private communicator. The fixed-width header contains protocol version, message kind, batch ID, item count, status, and `u64` payload length. Status is a checked scheduler tag; the wire codec treats payload bytes as opaque, while each scheduler/transport message kind defines its payload schema in the task that consumes it. Capacity one means a rank never has two payloads outstanding. Receivers first match the header, then receive exactly its announced payload from that source; no wildcard payload receive is allowed.
 
 `MAX_WIRE_BYTES` is `i32::MAX` for P0, matching rsmpi's MPI `Count`. Length is checked against that limit and local `usize` before allocation or send. Decoding validates the received MPI count, every integer conversion, protocol version, message/state compatibility, expected structure, and full byte consumption. Truncation, overflow, unexpected kind/tag/source, and trailing bytes are protocol errors.
 

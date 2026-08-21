@@ -113,3 +113,18 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - Non-blocking notes: defensive unreachable worker-index sentinel and the deterministic Outer second pass are retained as simple, safe implementation choices.
+
+### Task #13 — wire codec and signed error keys
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high; retry after timeout)
+- Pre-implementation verdict: **Correct-to-merge**
+- Scope: MPI-feature-gated fixed header/codec/conversion primitives and deterministic signed error-key arithmetic; no MPI calls, scheduler, transport trait, or same-rank helper
+- Pre-review refinements applied: use a 28-byte header without speculative reserved bytes; keep wire/error types crate-private until a public `PmapError` consumer exists; document status as a checked tag with payload schemas owned by later consumers; defer collective-helper message kinds.
+- Implementer: Luna (high, write-capable; parent completed integration after bounded timeout)
+- Scope: 28-byte checked header, bincode2 fixed/LE/full-consumption codec, conversion bounds, signed error keys and preflight candidates
+- Integration corrections: fixed the exact-overflow boundary assertion; added a narrowly reasoned module-level dead-code allowance because this independently pushed primitive slice precedes its Task #14/#15 consumers. The allowance must be removed when those consumers land.
+- Integration verification: 9 wire tests plus all existing tests pass under the runtime MPI feature; full feature/lint/doc matrix runs before push.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking coverage notes (world-size decode guard and oversized-header decode branch) are deferred to the final Task #19 coverage audit; shared validation paths are already covered.
