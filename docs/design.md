@@ -120,7 +120,7 @@ pub fn map_in<T, U, E, F>(
     mode: LocalMode,
     items: Vec<T>,
     f: F,
-) -> Result<Vec<U>, MapError>;
+) -> Result<Vec<U>, MapInError>;
 
 pub fn pmap<C, T, U, E, F>(
     world: &C,
@@ -135,7 +135,7 @@ where
 
 Here `Communicator` is the existing trait from the one selected rsmpi crate, not a Hataori transport trait. Core uses only communicator duplication, rank/size, tagged blocking send and exact-source receive, `immediate_probe_with_tag`, signed built-in min reductions, and broadcast. The two mutually exclusive dependencies expose that same rsmpi surface through a private crate alias.
 
-`MapError` records the lowest failing input index and bounded `E::to_string()`. Serial `map` stops at the first callback error. Rayon `Outer` stops admitting new work where Rayon permits, lets already started callbacks finish, and deterministically reports the lowest failed input index; `Sequential` and `Inner` stop after the failing item. `PmapError` is a core enum for preflight, domain, user, wire, and protocol failures and carries the deterministic error key and bounded message where applicable. Tensor/backend integration errors remain in the adapter.
+`MapError` records the lowest failing input index and bounded `E::to_string()`. Serial `map` stops at the first callback error. Rayon `Sequential` and `Inner` likewise stop after the failing item. Rayon `Outer` evaluates every input exactly once in the target pool, preserves input order, then deterministically reports the lowest failed input index; it does not short-circuit admission. `MapInError` distinguishes `MissingPool`, `ForeignPool`, `DomainBusy`, and `Callback(MapError)` because only callback failures have an input index. `map_in` checks them in that order: target pool presence, foreign-pool origin, domain admission, then callbacks. `PmapError` is a core enum for preflight, domain, user, wire, and protocol failures and carries the deterministic error key and bounded message where applicable. Tensor/backend integration errors remain in the adapter.
 
 - `map` is local serial execution and has no MPI, Rayon, or serialization requirements. `map_in` is its explicit-domain Rayon counterpart.
 - `pmap` is collective: all ranks call it in the same order on the same communicator. Calling it on different communicators or in a different collective order is a caller contract violation that MPI cannot recover from.
@@ -183,7 +183,8 @@ Managed mode creates and owns one Rayon pool from an explicit CPU set and worker
 On Linux, managed placement is strict and verified:
 
 - the CPU set must be a subset of the process's actual allowed CPUs;
-- a worker start hook pins each worker to a distinct declared CPU;
+- a worker start hook pins each worker to a distinct declared CPU, records its outcome without panicking, and signals a standard-library channel;
+- after `ThreadPoolBuilder::build` returns, construction waits with a bounded timeout until every start hook reports; any pin failure or missing report drops the owned pool and returns a typed construction error;
 - pin failure, duplicate assignment, an out-of-range CPU, or too many workers is a construction error;
 - placement is reported as `Verified`.
 
@@ -215,7 +216,7 @@ enum LocalMode {
 ```
 
 - `Sequential`: no local fan-out; the callback must remain sequential.
-- `Outer`: Hataori maps independent items in the selected domain; each item must not perform another competing fan-out.
+- `Outer`: Hataori evaluates every independent item exactly once in the selected domain, preserves input order, and reports the lowest callback-error index after all item results are available; each item must not perform another competing fan-out.
 - `Inner`: Hataori presents items sequentially and admits the callback as the sole coarse operation for the domain. The callback may use the domain's full declared `worker_count` through that same pool.
 
 P0 intentionally has no partial inner budget. Rayon cannot cap arbitrary nested same-pool work to fewer than the pool's workers without another scheduling mechanism, and tenferro's motivating contract asks for the complete supplied executor. A future partial budget requires a real backend need and a separately tested mechanism.
@@ -388,6 +389,7 @@ Core rejects before work begins:
 
 - more than one domain per rank;
 - ambient/global Rayon or hidden pool construction;
+- `map_in` on a sequential domain with no pool;
 - synchronous foreign-pool entry;
 - invalid or unverifiable Linux managed placement;
 - invalid external ownership declarations;

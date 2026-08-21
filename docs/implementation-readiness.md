@@ -33,6 +33,9 @@ Core implementation and release do not wait for the tensor adapter. Integrated t
 | Preflight no-error and error-key overflow | Passing ranks contribute `world_size`; largest-key overflow is a typed preflight failure. |
 | MPI public trait ambiguity | `Communicator` is explicitly the selected rsmpi dependency trait; core adds no transport trait and lists the used surface. |
 | Upstream rsmpi feature drift | Upstream `mpi` is pinned to `=0.8.1` with default/optional features disabled. |
+| Rayon local error split | `map_in` returns `MapInError` for missing/foreign/busy preconditions and wraps indexed callback failures as `Callback(MapError)`. |
+| Deterministic Rayon Outer errors | `Outer` evaluates every item exactly once, preserves order, and reports the lowest callback-error index without short-circuiting admission. |
+| Rayon worker-start race | Managed construction waits with a bounded standard-library channel for every non-panicking start hook to report pin success or failure. |
 
 ## 3. Upstream evidence
 
@@ -96,7 +99,7 @@ Both remain external blockers for the adapter only.
 
 1. **Crate and features** — single crate, dependency-free default, `rayon`, `mpi`, and pinned `rsmpi-rt`; reject both MPI features together.
 2. **Serial `map`** — ordered results, bounded callback errors, no serde/Send/Sync/`'static` leakage.
-3. **Domain and local Rayon** — managed/external ownership, RAII admission, `Sequential`/`Outer`/whole-domain `Inner`, Linux affinity and non-Linux declared placement.
+3. **Domain and local Rayon** — managed/external ownership, RAII admission, `Sequential`/deterministic full-evaluation `Outer`/whole-domain `Inner`, typed `MapInError`, Linux affinity and non-Linux declared placement.
 4. **Pure protocol state and wire** — coordinator transitions, stable IDs, framing, checked codec, signed deterministic error keys; no transport trait.
 5. **MPI-only `pmap`** — private communicator, collective preflight, dynamic scheduler, synchronous root participation, drain and reuse.
 6. **Hybrid `pmap`** — `in_place_scope`, local completion channel, fair `MPI_Iprobe` loop, rendezvous progress.
@@ -131,15 +134,16 @@ Commands become runnable when Step 1 creates `Cargo.toml`; they are merge gates 
 - simultaneous user/wire failures select one signed deterministic key on every rank;
 - recoverable failure leaves the caller communicator reusable and no private frame unmatched;
 - root-local codec instrumentation remains zero for `pmap`, `broadcast`, `scatter`, and `gather`;
-- serial `map`, Rayon `Sequential`/`Inner`, and Rayon `Outer` each satisfy the documented stop/finish/report-lowest-index error semantics;
+- serial `map` and Rayon `Sequential`/`Inner` stop at the first callback error, while Rayon `Outer` evaluates every input exactly once and reports the lowest failed index after ordered collection;
 - callback panic takes the abort path rather than attempting recoverable drain.
 
 ### Domain tests
 
-- Linux managed workers occupy distinct declared allowed CPUs and report `Verified`;
+- Linux managed workers occupy distinct declared allowed CPUs and report `Verified`; every start hook reports through the bounded construction latch, and injected/observable failures return typed construction errors without panic;
 - non-Linux managed mode does not claim pinning and reports `CallerDeclared`;
 - external pools are not repinned or shut down;
 - admission is released after success, error, and unwind;
+- `map_in` precondition precedence is missing pool, foreign pool, then busy admission; each fails before callback execution;
 - foreign-pool entry and conflicting outer/inner ownership fail before callback execution.
 
 ### Compile-time boundary tests

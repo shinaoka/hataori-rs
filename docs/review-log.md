@@ -96,3 +96,20 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
+
+### Task #12 — Rayon local execution and affinity
+
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Pre-implementation Round 1 verdict: **Changes requested**
+- Required design fixes: return typed `MapInError`; make `Outer` fully evaluate for deterministic lowest-index errors; wait for every non-panicking managed worker start hook via a bounded channel; do not expose the raw `Arc<ThreadPool>`.
+- Fixes applied: `docs/design.md` §§3/5/6/15 and readiness Steps/tests now define the error split and precedence, deterministic Outer contract, bounded worker-start reporting, and no raw-pool API.
+- Follow-up pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Follow-up pre-implementation verdict: **Correct-to-merge**
+- Implementer: Luna (high, write-capable; continued after bounded timeouts)
+- Scope: `LocalMode`, typed `MapInError`, explicit-pool `map_in`, managed/external domains, Linux pinning, non-Linux declared placement, constructor and execution tests
+- Integration corrections: split start-handler CPU ownership from report validation; use one total startup deadline; import only required Rayon iterator traits; preserve raw pool access as crate-private only.
+- Integration verification: 28 Rayon unit tests and 3 doctests pass; all six feature-set checks/tests and Rust 1.85 Rayon checks pass; full lint/doc matrix is run before push.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, high)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking notes: defensive unreachable worker-index sentinel and the deterministic Outer second pass are retained as simple, safe implementation choices.

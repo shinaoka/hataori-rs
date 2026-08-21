@@ -1,11 +1,18 @@
 //! Hataori: synchronous serial, Rayon, and MPI data-parallel execution.
 
 mod domain;
+#[cfg(feature = "rayon")]
+mod local;
 mod map;
 
 pub use domain::{
-    Domain, DomainAdmission, DomainBusy, DomainId, NegativeRank, Place, UnsupportedDomainId,
+    Domain, DomainAdmission, DomainBusy, DomainId, LocalMode, NegativeRank, Place,
+    UnsupportedDomainId,
 };
+#[cfg(feature = "rayon")]
+pub use domain::{DomainBuildError, PlacementStatus, PoolOwnership};
+#[cfg(feature = "rayon")]
+pub use local::{map_in, MapInError};
 pub use map::{map, MapError};
 
 #[cfg(all(feature = "mpi", feature = "rsmpi-rt"))]
