@@ -84,7 +84,7 @@ fn main() {
     let _ = hataori::pmap(
         &world,
         &hataori::Domain::sequential(),
-        hataori::PmapOptions { root: 0, batch_size: NonZeroUsize::new(1).unwrap(), local_mode: hataori::LocalMode::Sequential },
+        hataori::PmapOptions { root: 0, batch_size: NonZeroUsize::new(1).unwrap(), local_mode: hataori::LocalMode::Sequential, prefetch: false },
         (rank == 0).then(|| vec![Local(Rc::new(1))]),
         move |value| { captured.set(captured.get() + 1); Ok::<_, String>(value) },
     );
@@ -106,7 +106,7 @@ fn main() {
     let calls = AtomicUsize::new(0);
     let _ = hataori::pmap(
         &world, &domain,
-        hataori::PmapOptions { root: 0, batch_size: NonZeroUsize::new(1).unwrap(), local_mode: hataori::LocalMode::Outer },
+        hataori::PmapOptions { root: 0, batch_size: NonZeroUsize::new(1).unwrap(), local_mode: hataori::LocalMode::Outer, prefetch: true },
         (world.rank() == 0).then(|| vec![1]),
         |value| { calls.fetch_add(1, Ordering::Relaxed); Ok::<_, String>(value + bias) },
     );

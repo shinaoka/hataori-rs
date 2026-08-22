@@ -110,6 +110,7 @@ pub struct PmapOptions {
     pub root: Rank,
     pub batch_size: NonZeroUsize,
     pub local_mode: LocalMode,
+    pub prefetch: bool,
 }
 
 pub fn map<T, U, E, F>(items: Vec<T>, f: F)
@@ -425,7 +426,7 @@ Core rejects before work begins:
 - invalid external ownership declarations;
 - worker or background-thread MPI calls;
 - domain admission contention;
-- requests for nonblocking data transfer, prefetch, background progress, or dedicated-coordinator behavior.
+- requests for nonblocking data transfer, MPI-only prefetch, background progress, or dedicated-coordinator behavior.
 
 The build rejects simultaneous `mpi` and `rsmpi-rt` features.
 
@@ -509,21 +510,25 @@ Backend-specific errors do not enter the core error enum.
 - A process-global Hataori CPU broker or tensor cache
 - Zero-copy, MPI derived datatypes, GPU-aware MPI, or custom transport/codec abstractions
 
-## 18. P1 gates
+## 18. P1 bounded prefetch and later gates
 
-P1 work is demand-driven, not predesigned into P0.
+P1 adds the opt-in, default-off bounded-prefetch mode specified in
+[`design/bounded-prefetch.md`](design/bounded-prefetch.md). It permits exactly
+one running and one prefetched batch on each remote hybrid domain. The MPI
+initialization thread overlaps ordinary blocking transfer with borrowed callback
+execution in the explicit Rayon pool; P1 adds no MPI request lifecycle,
+progress thread, async runtime, or `'static` bound. MPI-only calls reject the
+option during collective preflight, and the root domain remains capacity one.
 
-### Nonblocking overlap
+The option remains default-off. Enable it by default only if:
 
-Prototype init-thread `Isend`/`Irecv`/`Test*` with at most one running and one prefetched batch. Productize it only if:
-
-- exposed communication/serialization wait is at least 15% of wall time in a real workload;
 - across at least seven runs, median end-to-end time improves by at least 10%;
 - representative compute-heavy and small-payload regressions are at most 5%;
-- memory remains bounded by two resident batches per domain;
+- memory remains bounded by two resident batches per remote domain;
 - FUNNELED identity, ordering, draining, and reuse remain correct.
 
-Only a detached/overlapped entry that truly requires ownership may add `Send + 'static`; those bounds must not leak into P0 scoped APIs.
+A later owning/detached API that truly requires ownership may add `Send +
+'static`; those bounds must not leak into the existing scoped APIs.
 
 ### Other P1 candidates
 

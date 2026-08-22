@@ -19,6 +19,8 @@ cd "$root_dir"
 export BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-"-I$(gcc -print-file-name=include)"}
 cargo build --example mpi_pmap_smoke --no-default-features --features mpi,rayon
 cp target/debug/examples/mpi_pmap_smoke "$tmp_dir/upstream"
+cargo build --example mpi_pmap_smoke --no-default-features --features mpi
+cp target/debug/examples/mpi_pmap_smoke "$tmp_dir/upstream-mpi-only"
 cargo build --example rsmpi_rt_pmap_smoke --no-default-features --features rsmpi-rt,rayon
 cp target/debug/examples/rsmpi_rt_pmap_smoke "$tmp_dir/runtime"
 
@@ -55,6 +57,17 @@ run_case() {
     }
 }
 
+for count in 1 2 4; do
+    output=$tmp_dir/upstream-mpi-only-$count.log
+    if ! setsid timeout --signal=TERM --kill-after=5s 120s \
+        "$launcher" "${launcher_flags[@]}" -n "$count" "$tmp_dir/upstream-mpi-only" \
+        >"$output" 2>&1; then
+        cat "$output" >&2
+        printf 'check-hybrid: upstream MPI-only backend failed at n=%s\n' "$count" >&2
+        exit 1
+    fi
+done
+
 for backend in upstream runtime; do
     for count in 1 2 4; do
         run_case "$backend" "$count"
@@ -82,6 +95,31 @@ for backend in upstream runtime; do
         printf 'check-hybrid: %s panic path lacked abort evidence\n' "$backend" >&2
         exit 1
     }
+
+    output=$tmp_dir/$backend-prefetch-transfer-abort.log
+    trace=$tmp_dir/$backend-prefetch-transfer-abort
+    environment=(env HATAORI_PREFETCH_TRANSFER_ABORT=$trace)
+    if [[ $backend == runtime ]]; then
+        environment+=(MPI_RT_LIB=$mpi_rt_lib)
+    fi
+    set +e
+    setsid timeout --signal=TERM --kill-after=5s 15s \
+        "${environment[@]}" "$launcher" "${launcher_flags[@]}" -n 2 "$binary" \
+        >"$output" 2>&1
+    status=$?
+    set -e
+    if ((status == 0 || status == 124 || status == 137)); then
+        cat "$output" >&2
+        printf 'check-hybrid: %s live-prefetch transfer failure did not abort promptly\n' \
+            "$backend" >&2
+        exit 1
+    fi
+    grep -Eq 'MPI_ABORT|MPI_Abort' "$output" && grep -Eq 'errorcode[^0-9]*75|code[^0-9]*75' "$output" || {
+        cat "$output" >&2
+        printf 'check-hybrid: %s live-prefetch transfer failure lacked abort(75) evidence\n' \
+            "$backend" >&2
+        exit 1
+    }
 done
 
-printf 'hybrid checks passed for mpi and rsmpi-rt (n=1,2,4)\n'
+printf 'MPI-only preflight and hybrid checks passed for mpi and rsmpi-rt (n=1,2,4)\n'

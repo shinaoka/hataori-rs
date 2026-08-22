@@ -243,3 +243,26 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, `high`; bounded finalization after full-diff inspection exhausted its reporting turn budget)
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
+
+### P1 — bounded prefetch
+
+- Design slice: `docs/design/bounded-prefetch.md` plus the P1 amendments in `docs/design.md` and `docs/implementation-readiness.md`
+- Reviewer selected by user: `reviewer-flash-opencode-go` (DeepSeek family, read-only, `high`)
+- Initial verdict: **Changes requested**
+- Blocking finding: a current-batch error while a prefetched batch existed did not normatively retain the prefetched `RunningMeta`; following the P0 transition would strand its later `RESULT` in a metadata-less state and abort instead of draining.
+- Fix: every current completion in `Running(current, prefetched)` now consumes only pinned current metadata, retains and promotes the prefetched metadata, sends `STOP` to its next `READY` after failure, validates its result in `Stopping(prefetched)`, and then accepts `DRAIN`; corrupt received IDs cannot overwrite either pinned identity.
+- Additional clarifications: removed the duplicate chart edge, added the continuing `READY/TASK` edge, made preflight flag agreement and MPI-only rejection explicit, and pinned the remote `in_place_scope` plus capacity-one outcome mechanism.
+- Exact-state follow-up verdict: **Correct-to-merge**
+- Blocking findings: none
+- Implementation safety delta: once a remote N+1 callback is live, failures in the next READY/header/kind path or preceding RESULT encode/send abort immediately from the MPI init-thread scope body instead of deferring abort behind scoped join; fully received payload decode failures remain recoverable typed outcomes.
+- Safety-delta initial verdict: **Changes requested** (correct the join rationale, enumerate every live-job error site, and require a non-vacuous subprocess watchdog).
+- Safety-delta fixes: pinned `MPI_Abort(75)`, the join-before-abort/unmatched-frame rationale, exact live-job sites, unchanged root/P0 behavior, and a result-serialization fault with a deliberately live N+1 callback.
+- Safety-delta exact-state verdict: **Correct-to-merge**
+- Gate status: **COMPLETE — P1 bounded-prefetch implementation may start**
+- Implementation commit reviewed: `3285940b06f6a562c8ca65e55d11469d82b5783a`
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (DeepSeek family, read-only, `high`)
+- Full-diff evidence: all 1,864 lines / 77,341 bytes of `/tmp/hataori-p1-full.diff` inspected with current-source context
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking coverage findings fixed before submission: execute the upstream MPI-only smoke rather than compile it only; exercise prefetched batch size greater than one; assert a corrupt current ID leaves prefetched metadata and pending work unchanged.
+- Retained non-blocking notes: direct abort(75) conservatively covers a few no-successor cases, and the deterministic overlap handshake may have both adjacent callbacks waiting on the same task-transfer marker; neither weakens the contract.

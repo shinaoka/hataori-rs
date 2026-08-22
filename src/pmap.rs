@@ -91,6 +91,11 @@ pub struct PmapOptions {
     pub batch_size: NonZeroUsize,
     /// Rank-local execution mode; MPI-only calls require [`LocalMode::Sequential`].
     pub local_mode: LocalMode,
+    /// Allows one prefetched batch per remote hybrid domain.
+    ///
+    /// The default is `false`. MPI-only calls reject `true` during collective
+    /// preflight; hybrid calls keep the root domain at capacity one.
+    pub prefetch: bool,
 }
 
 impl Default for PmapOptions {
@@ -99,6 +104,7 @@ impl Default for PmapOptions {
             root: 0,
             batch_size: NonZeroUsize::new(1).unwrap(),
             local_mode: LocalMode::Sequential,
+            prefetch: false,
         }
     }
 }
@@ -310,6 +316,42 @@ struct LocalBatchOutcome<U> {
 }
 
 #[cfg(feature = "rayon")]
+enum WorkerBatchResult<U> {
+    Values(Vec<(usize, U)>),
+    Error {
+        failure: CallbackFailure,
+        class: ErrorClass,
+        kind: PmapErrorKind,
+    },
+    Panic,
+}
+
+#[cfg(feature = "rayon")]
+struct WorkerBatchOutcome<U> {
+    batch_id: u64,
+    item_count: usize,
+    result: WorkerBatchResult<U>,
+}
+
+#[cfg(feature = "rayon")]
+enum PrefetchedBatch<T, U> {
+    Work {
+        batch_id: u64,
+        item_count: usize,
+        items: Vec<(usize, T)>,
+    },
+    Ready(WorkerBatchOutcome<U>),
+    Stop,
+}
+
+#[cfg(feature = "rayon")]
+enum NextWorkerBatch<U> {
+    Running(Receiver<WorkerBatchOutcome<U>>),
+    Ready(WorkerBatchOutcome<U>),
+    Stop,
+}
+
+#[cfg(feature = "rayon")]
 fn spawn_local_batch<'scope, T, U, E, F>(
     scope: &Scope<'scope>,
     mode: LocalMode,
@@ -349,6 +391,137 @@ fn spawn_local_batch<'scope, T, U, E, F>(
         };
         let _ = sender.send(LocalBatchOutcome { batch_id, result });
     });
+}
+
+#[cfg(feature = "rayon")]
+fn spawn_worker_batch<'scope, T, U, E, F>(
+    scope: &Scope<'scope>,
+    mode: LocalMode,
+    batch_id: u64,
+    item_count: usize,
+    items: Vec<(usize, T)>,
+    f: &'scope F,
+    sender: SyncSender<WorkerBatchOutcome<U>>,
+) where
+    T: Send + 'scope,
+    U: Send + 'scope,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    let (indices, values): (Vec<_>, Vec<_>) = items.into_iter().unzip();
+    scope.spawn(move |_| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_in_current_pool(mode, values, f)
+        }));
+        let result = match result {
+            Ok(Ok(values)) => WorkerBatchResult::Values(indices.into_iter().zip(values).collect()),
+            Ok(Err(error)) => {
+                let index = indices[error.index()];
+                WorkerBatchResult::Error {
+                    failure: CallbackFailure {
+                        index,
+                        kind: PmapErrorKind::User.code(),
+                        message: error.message().to_owned(),
+                    },
+                    class: ErrorClass::Callback,
+                    kind: PmapErrorKind::User,
+                }
+            }
+            Err(_) => WorkerBatchResult::Panic,
+        };
+        let _ = sender.send(WorkerBatchOutcome {
+            batch_id,
+            item_count,
+            result,
+        });
+    });
+}
+
+#[cfg(feature = "rayon")]
+fn receive_prefetched_batch<C, T, U>(
+    comm: &C,
+    root: i32,
+) -> Result<PrefetchedBatch<T, U>, PmapError>
+where
+    C: Communicator,
+    T: DeserializeOwned,
+{
+    let value = receive_header(comm, root)?;
+    match value.kind() {
+        MessageKind::Task => {
+            let batch_id = value.batch_id();
+            match receive_payload::<_, Vec<(usize, T)>>(comm, root, value) {
+                Ok(items) => Ok(PrefetchedBatch::Work {
+                    batch_id,
+                    item_count: items.len(),
+                    items,
+                }),
+                Err(error) => Ok(PrefetchedBatch::Ready(WorkerBatchOutcome {
+                    batch_id,
+                    item_count: 1,
+                    result: WorkerBatchResult::Error {
+                        failure: CallbackFailure {
+                            index: usize::try_from(value.item_count()).unwrap_or(usize::MAX),
+                            kind: PmapErrorKind::Wire.code(),
+                            message: error.message().to_owned(),
+                        },
+                        class: ErrorClass::WireProtocol,
+                        kind: PmapErrorKind::Wire,
+                    },
+                })),
+            }
+        }
+        MessageKind::Stop => Ok(PrefetchedBatch::Stop),
+        _ => Err(protocol_error("worker received an unexpected message")),
+    }
+}
+
+#[cfg(feature = "rayon")]
+fn send_worker_outcome<C, U>(
+    comm: &C,
+    root: i32,
+    rank: i32,
+    size: i32,
+    outcome: WorkerBatchOutcome<U>,
+    local_key: &mut i64,
+    local_error: &mut Option<LocalError>,
+) -> Result<(), PmapError>
+where
+    C: Communicator,
+    U: Serialize,
+{
+    match outcome.result {
+        WorkerBatchResult::Values(values) => send_frame(
+            comm,
+            root,
+            MessageKind::Result,
+            MessageStatus::Ok,
+            outcome.batch_id,
+            values.len(),
+            &ResultPayload::Values(values),
+        ),
+        WorkerBatchResult::Error {
+            failure,
+            class,
+            kind,
+        } => {
+            let key = error_key(failure.index, class, rank, size)?;
+            if key < *local_key {
+                *local_key = key;
+                *local_error = Some((kind, failure.message.clone()));
+            }
+            send_frame(
+                comm,
+                root,
+                MessageKind::Result,
+                MessageStatus::Error,
+                outcome.batch_id,
+                outcome.item_count,
+                &ResultPayload::<U>::Error(failure),
+            )
+        }
+        WorkerBatchResult::Panic => mpi_call!(comm.abort(71)),
+    }
 }
 
 #[cfg(feature = "rayon")]
@@ -460,6 +633,7 @@ where
         LocalMode::Outer => 1,
         LocalMode::Inner => 2,
     };
+    let local_prefetch = i32::from(options.prefetch);
 
     let mut min_root = options.root;
     let mut max_root = options.root;
@@ -467,12 +641,16 @@ where
     let mut max_batch = local_batch;
     let mut min_mode = local_mode;
     let mut max_mode = local_mode;
+    let mut min_prefetch = local_prefetch;
+    let mut max_prefetch = local_prefetch;
     mpi_call!(comm.all_reduce_into(&options.root, &mut min_root, SystemOperation::min()));
     mpi_call!(comm.all_reduce_into(&options.root, &mut max_root, SystemOperation::max()));
     mpi_call!(comm.all_reduce_into(&local_batch, &mut min_batch, SystemOperation::min()));
     mpi_call!(comm.all_reduce_into(&local_batch, &mut max_batch, SystemOperation::max()));
     mpi_call!(comm.all_reduce_into(&local_mode, &mut min_mode, SystemOperation::min()));
     mpi_call!(comm.all_reduce_into(&local_mode, &mut max_mode, SystemOperation::max()));
+    mpi_call!(comm.all_reduce_into(&local_prefetch, &mut min_prefetch, SystemOperation::min()));
+    mpi_call!(comm.all_reduce_into(&local_prefetch, &mut max_prefetch, SystemOperation::max()));
 
     let local_valid = mpi_call!(crate::mpi_check::is_thread_main())
         && options.root >= 0
@@ -481,7 +659,8 @@ where
         && execution_valid
         && min_root == max_root
         && min_batch == max_batch
-        && min_mode == max_mode;
+        && min_mode == max_mode
+        && min_prefetch == max_prefetch;
     let candidate = wire::preflight_candidate(!local_valid, rank, size).map_err(wire_error)?;
     let mut failing_rank = candidate;
     mpi_call!(comm.all_reduce_into(&candidate, &mut failing_rank, SystemOperation::min()));
@@ -602,7 +781,7 @@ where
 }
 
 #[cfg(feature = "rayon")]
-fn hybrid_worker_loop<C, T, U, E, F>(
+fn hybrid_worker_loop_no_prefetch<C, T, U, E, F>(
     comm: &C,
     root: i32,
     mode: LocalMode,
@@ -706,6 +885,145 @@ where
             }
             _ => return Err(protocol_error("worker received an unexpected message")),
         }
+    }
+}
+
+#[cfg(feature = "rayon")]
+fn hybrid_worker_loop_prefetch<C, T, U, E, F>(
+    comm: &C,
+    root: i32,
+    mode: LocalMode,
+    pool: &rayon::ThreadPool,
+    f: F,
+) -> Result<(i64, Option<LocalError>), PmapError>
+where
+    C: Communicator,
+    T: Serialize + DeserializeOwned + Send,
+    U: Serialize + DeserializeOwned + Send,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    let rank = mpi_call!(comm.rank());
+    let size = mpi_call!(comm.size());
+    let mut local_key = ErrorKey::NO_ERROR_KEY;
+    let mut local_error = None;
+
+    pool.in_place_scope(|scope| 'idle: loop {
+        send_empty(comm, root, MessageKind::Ready, 0)?;
+        let first = receive_prefetched_batch::<_, T, U>(comm, root)?;
+        let (batch_id, item_count, items) = match first {
+            PrefetchedBatch::Work {
+                batch_id,
+                item_count,
+                items,
+            } => (batch_id, item_count, items),
+            PrefetchedBatch::Ready(outcome) => {
+                send_worker_outcome(
+                    comm,
+                    root,
+                    rank,
+                    size,
+                    outcome,
+                    &mut local_key,
+                    &mut local_error,
+                )?;
+                continue;
+            }
+            PrefetchedBatch::Stop => {
+                send_empty(comm, root, MessageKind::Drain, 0)?;
+                return Ok((local_key, local_error));
+            }
+        };
+
+        let (sender, mut receiver) = mpsc::sync_channel(1);
+        spawn_worker_batch::<T, U, E, F>(scope, mode, batch_id, item_count, items, &f, sender);
+
+        loop {
+            if send_empty(comm, root, MessageKind::Ready, 0).is_err() {
+                mpi_call!(comm.abort(75));
+            }
+            let next = match receive_prefetched_batch::<_, T, U>(comm, root) {
+                Ok(next) => next,
+                Err(_) => mpi_call!(comm.abort(75)),
+            };
+            let outcome = match receiver.recv() {
+                Ok(outcome) => outcome,
+                Err(_) => mpi_call!(comm.abort(71)),
+            };
+
+            let next = match next {
+                PrefetchedBatch::Work {
+                    batch_id,
+                    item_count,
+                    items,
+                } => {
+                    let (sender, receiver) = mpsc::sync_channel(1);
+                    spawn_worker_batch::<T, U, E, F>(
+                        scope, mode, batch_id, item_count, items, &f, sender,
+                    );
+                    NextWorkerBatch::Running(receiver)
+                }
+                PrefetchedBatch::Ready(outcome) => NextWorkerBatch::Ready(outcome),
+                PrefetchedBatch::Stop => NextWorkerBatch::Stop,
+            };
+
+            if send_worker_outcome(
+                comm,
+                root,
+                rank,
+                size,
+                outcome,
+                &mut local_key,
+                &mut local_error,
+            )
+            .is_err()
+            {
+                mpi_call!(comm.abort(75));
+            }
+
+            match next {
+                NextWorkerBatch::Running(next_receiver) => receiver = next_receiver,
+                NextWorkerBatch::Ready(outcome) => {
+                    send_worker_outcome(
+                        comm,
+                        root,
+                        rank,
+                        size,
+                        outcome,
+                        &mut local_key,
+                        &mut local_error,
+                    )?;
+                    continue 'idle;
+                }
+                NextWorkerBatch::Stop => {
+                    send_empty(comm, root, MessageKind::Drain, 0)?;
+                    return Ok((local_key, local_error));
+                }
+            }
+        }
+    })
+}
+
+#[cfg(feature = "rayon")]
+fn hybrid_worker_loop<C, T, U, E, F>(
+    comm: &C,
+    root: i32,
+    mode: LocalMode,
+    prefetch: bool,
+    pool: &rayon::ThreadPool,
+    f: F,
+) -> Result<(i64, Option<LocalError>), PmapError>
+where
+    C: Communicator,
+    T: Serialize + DeserializeOwned + Send,
+    U: Serialize + DeserializeOwned + Send,
+    E: Display + Send,
+    F: Fn(T) -> Result<U, E> + Send + Sync,
+{
+    if prefetch {
+        hybrid_worker_loop_prefetch(comm, root, mode, pool, f)
+    } else {
+        hybrid_worker_loop_no_prefetch(comm, root, mode, pool, f)
     }
 }
 
@@ -888,8 +1206,14 @@ where
     let size = mpi_call!(comm.size());
     let remotes: Vec<i32> = (0..size).filter(|candidate| *candidate != root).collect();
     let call_task_key = root_items.len();
-    let mut scheduler = Coordinator::<T, U>::new(root, remotes, root_items, options.batch_size)
-        .map_err(scheduler_error)?;
+    let mut scheduler = Coordinator::<T, U>::new_with_prefetch(
+        root,
+        remotes,
+        root_items,
+        options.batch_size,
+        options.prefetch,
+    )
+    .map_err(scheduler_error)?;
     let mut local_key = ErrorKey::NO_ERROR_KEY;
     let mut local_error = None;
 
@@ -969,8 +1293,14 @@ where
     let size = mpi_call!(comm.size());
     let remotes: Vec<i32> = (0..size).filter(|candidate| *candidate != root).collect();
     let call_task_key = root_items.len();
-    let mut scheduler = Coordinator::<T, U>::new(root, remotes, root_items, options.batch_size)
-        .map_err(scheduler_error)?;
+    let mut scheduler = Coordinator::<T, U>::new_with_prefetch(
+        root,
+        remotes,
+        root_items,
+        options.batch_size,
+        options.prefetch,
+    )
+    .map_err(scheduler_error)?;
     let mut local_key = ErrorKey::NO_ERROR_KEY;
     let mut local_error = None;
 
@@ -1098,7 +1428,8 @@ impl PmapErrorKind {
 /// in `[0, world.size())`.
 ///
 /// This MPI-only entry is synchronous and adds no `Send`, `Sync`, or `'static`
-/// bounds to the callback or values.
+/// bounds to the callback or values. It rejects [`PmapOptions::prefetch`] during
+/// collective preflight.
 #[cfg(not(feature = "rayon"))]
 pub fn pmap<C, T, U, E, F>(
     world: &C,
@@ -1124,7 +1455,8 @@ where
         admission.is_ok()
             && domain.id().get() == 0
             && domain.worker_count() == 1
-            && options.local_mode == LocalMode::Sequential,
+            && options.local_mode == LocalMode::Sequential
+            && !options.prefetch,
     )?;
     let _admission = admission.expect("successful preflight guarantees domain admission");
 
@@ -1160,7 +1492,10 @@ where
 /// Rayon worker, and MPI must provide `MPI_THREAD_FUNNELED` or stronger.
 /// Callback state may borrow non-`'static` data while satisfying the stated
 /// Rayon `Send`/`Sync` bounds; values retain the serialization bounds required
-/// by remote execution. All MPI calls remain on the calling thread.
+/// by remote execution. All MPI calls remain on the calling thread. When
+/// [`PmapOptions::prefetch`] is true, each remote domain may hold one additional
+/// batch so blocking task/result transfer overlaps adjacent callback execution;
+/// the root domain remains capacity one.
 #[cfg(feature = "rayon")]
 pub fn pmap<C, T, U, E, F>(
     world: &C,
@@ -1206,8 +1541,15 @@ where
             &f,
         )
     } else {
-        hybrid_worker_loop(&comm, options.root, options.local_mode, pool.as_ref(), f)
-            .map(|(key, error)| (Vec::new(), key, error))
+        hybrid_worker_loop(
+            &comm,
+            options.root,
+            options.local_mode,
+            options.prefetch,
+            pool.as_ref(),
+            f,
+        )
+        .map(|(key, error)| (Vec::new(), key, error))
     };
     let (results, local_key, local_error) = match outcome {
         Ok(outcome) => outcome,
@@ -1387,6 +1729,11 @@ mod mpi_fault_tests {
 
 #[cfg(all(test, feature = "rayon"))]
 mod tests {
+    #[test]
+    fn prefetch_is_opt_in() {
+        assert!(!super::PmapOptions::default().prefetch);
+    }
+
     #[test]
     fn root_event_chooser_alternates_when_both_sources_are_ready() {
         let mut prefer_local = true;

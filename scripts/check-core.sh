@@ -59,4 +59,4 @@ if rustup target list --installed | grep -qx 'x86_64-apple-darwin'; then
 fi
 
 git diff --check
-printf 'complete Hataori P0 core acceptance matrix passed\n'
+printf 'complete Hataori core acceptance matrix passed\n'

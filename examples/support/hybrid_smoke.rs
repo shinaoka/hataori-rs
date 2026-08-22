@@ -2,7 +2,7 @@ use super::mpi_api::collective::SystemOperation;
 use super::mpi_api::traits::*;
 use hataori::{pmap, Domain, LocalMode, PmapErrorKind, PmapOptions};
 use rayon::ThreadPoolBuilder;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,6 +20,70 @@ impl Drop for RendezvousValue {
         if self.mark_on_drop {
             let _ = std::fs::write(&self.trace_path, b"remote-result-send-completed");
         }
+    }
+}
+
+#[derive(Serialize)]
+struct PrefetchTraceValue {
+    value: i32,
+    mark_on_deserialize: Option<String>,
+    fail_on_deserialize: bool,
+}
+
+#[derive(Deserialize)]
+struct PrefetchTraceWire {
+    value: i32,
+    mark_on_deserialize: Option<String>,
+    fail_on_deserialize: bool,
+}
+
+impl<'de> Deserialize<'de> for PrefetchTraceValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = PrefetchTraceWire::deserialize(deserializer)?;
+        if let Some(path) = &wire.mark_on_deserialize {
+            std::fs::write(path, b"deserialized").map_err(serde::de::Error::custom)?;
+        }
+        if wire.fail_on_deserialize {
+            return Err(serde::de::Error::custom("expected prefetch decode failure"));
+        }
+        Ok(Self {
+            value: wire.value,
+            mark_on_deserialize: wire.mark_on_deserialize,
+            fail_on_deserialize: false,
+        })
+    }
+}
+
+fn wait_for_trace(path: &str, message: &str) {
+    let observed = (0..500).any(|_| {
+        if std::path::Path::new(path).exists() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        }
+    });
+    assert!(observed, "{message}");
+}
+
+#[derive(Deserialize)]
+struct AbortSerializeValue {
+    value: i32,
+    wait_before_failure: Option<String>,
+}
+
+impl Serialize for AbortSerializeValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Some(path) = &self.wait_before_failure {
+            wait_for_trace(
+                path,
+                "prefetched callback did not start before result failure",
+            );
+            return Err(serde::ser::Error::custom(
+                "expected live-prefetch result serialization failure",
+            ));
+        }
+        (&self.value, &self.wait_before_failure).serialize(serializer)
     }
 }
 
@@ -50,6 +114,64 @@ pub fn run<C: Communicator>(world: &C) {
         panic!("hybrid callback panic did not abort the MPI job");
     }
 
+    if let Some(base) = std::env::var_os("HATAORI_PREFETCH_TRANSFER_ABORT") {
+        assert_eq!(world.size(), 2);
+        let base = base.to_string_lossy();
+        let task_trace = format!("{base}.task");
+        let callback_trace = format!("{base}.callback");
+        if rank == 0 {
+            let _ = std::fs::remove_file(&task_trace);
+            let _ = std::fs::remove_file(&callback_trace);
+        }
+        world.barrier();
+        let callback_task_trace = task_trace.clone();
+        let callback_started_trace = callback_trace.clone();
+        let _ = pmap(
+            world,
+            &domain,
+            PmapOptions {
+                prefetch: true,
+                ..PmapOptions::default()
+            },
+            (rank == 0).then(|| {
+                vec![
+                    PrefetchTraceValue {
+                        value: 0,
+                        mark_on_deserialize: None,
+                        fail_on_deserialize: false,
+                    },
+                    PrefetchTraceValue {
+                        value: 1,
+                        mark_on_deserialize: None,
+                        fail_on_deserialize: false,
+                    },
+                    PrefetchTraceValue {
+                        value: 2,
+                        mark_on_deserialize: Some(task_trace),
+                        fail_on_deserialize: false,
+                    },
+                ]
+            }),
+            |item| {
+                if item.value <= 1 {
+                    wait_for_trace(
+                        &callback_task_trace,
+                        "prefetched task did not arrive before current callback",
+                    );
+                }
+                if item.value == 2 {
+                    std::fs::write(&callback_started_trace, b"started").unwrap();
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+                Ok::<_, String>(AbortSerializeValue {
+                    value: item.value,
+                    wait_before_failure: (item.value == 1).then(|| callback_started_trace.clone()),
+                })
+            },
+        );
+        panic!("prefetched result serialization failure did not abort the MPI job");
+    }
+
     for mode in [LocalMode::Sequential, LocalMode::Outer, LocalMode::Inner] {
         let calls = AtomicUsize::new(0);
         let root_participated = AtomicBool::new(false);
@@ -62,6 +184,7 @@ pub fn run<C: Communicator>(world: &C) {
                 root: 0,
                 batch_size: NonZeroUsize::new(3).unwrap(),
                 local_mode: mode,
+                prefetch: false,
             },
             input,
             |item| {
@@ -96,6 +219,66 @@ pub fn run<C: Communicator>(world: &C) {
         }
     }
 
+    let prefetched_calls = AtomicUsize::new(0);
+    let prefetched_input = (rank == 0).then(|| (0..16).collect::<Vec<i32>>());
+    let prefetched = pmap(
+        world,
+        &domain,
+        PmapOptions {
+            root: 0,
+            batch_size: NonZeroUsize::new(3).unwrap(),
+            local_mode: LocalMode::Sequential,
+            prefetch: true,
+        },
+        prefetched_input,
+        |item| {
+            prefetched_calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, String>(item * 3)
+        },
+    )
+    .unwrap();
+    let local_prefetched_calls = prefetched_calls.load(Ordering::Relaxed) as i64;
+    let mut total_prefetched_calls = 0_i64;
+    world.all_reduce_into(
+        &local_prefetched_calls,
+        &mut total_prefetched_calls,
+        SystemOperation::sum(),
+    );
+    assert_eq!(total_prefetched_calls, 16);
+    if rank == 0 {
+        assert_eq!(
+            prefetched.unwrap(),
+            (0..16).map(|item| item * 3).collect::<Vec<_>>()
+        );
+    }
+
+    let empty = pmap(
+        world,
+        &domain,
+        PmapOptions {
+            prefetch: true,
+            ..PmapOptions::default()
+        },
+        (rank == 0).then(Vec::<i32>::new),
+        Ok::<_, String>,
+    )
+    .unwrap();
+    assert_eq!(empty.is_some(), rank == 0);
+    let one = pmap(
+        world,
+        &domain,
+        PmapOptions {
+            prefetch: true,
+            ..PmapOptions::default()
+        },
+        (rank == 0).then(|| vec![41_i32]),
+        |item| Ok::<_, String>(item + 1),
+    )
+    .unwrap();
+    if rank == 0 {
+        assert_eq!(one.unwrap(), vec![42]);
+    }
+
     let error_calls = AtomicUsize::new(0);
     let error = pmap(
         world,
@@ -104,6 +287,7 @@ pub fn run<C: Communicator>(world: &C) {
             root: 0,
             batch_size: NonZeroUsize::new(8).unwrap(),
             local_mode: LocalMode::Outer,
+            prefetch: false,
         },
         (rank == 0).then(|| (0..8).collect::<Vec<i32>>()),
         |item| {
@@ -126,6 +310,33 @@ pub fn run<C: Communicator>(world: &C) {
     assert_eq!(total_error_calls, 8);
     assert_eq!(error.kind(), PmapErrorKind::User);
     assert_eq!(error.message(), "first hybrid failure");
+
+    if world.size() > 1 {
+        let mismatch_calls = AtomicUsize::new(0);
+        let mismatch = pmap(
+            world,
+            &domain,
+            PmapOptions {
+                prefetch: rank == 0,
+                ..PmapOptions::default()
+            },
+            (rank == 0).then(|| vec![1_i32]),
+            |item| {
+                mismatch_calls.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, String>(item)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.kind(), PmapErrorKind::Preflight);
+        let local_mismatch_calls = mismatch_calls.load(Ordering::Relaxed) as i64;
+        let mut total_mismatch_calls = 0_i64;
+        world.all_reduce_into(
+            &local_mismatch_calls,
+            &mut total_mismatch_calls,
+            SystemOperation::sum(),
+        );
+        assert_eq!(total_mismatch_calls, 0);
+    }
 
     let missing = Domain::sequential();
     let missing_error = pmap(
@@ -160,6 +371,244 @@ pub fn run<C: Communicator>(world: &C) {
     .unwrap();
     if rank == 0 {
         assert_eq!(reused.unwrap(), vec![6, 2, 8]);
+    }
+
+    if world.size() == 2 {
+        if let Ok(trace_path) = std::env::var("HATAORI_HYBRID_TRACE") {
+            let task_trace = format!("{trace_path}.prefetched-task");
+            let result_trace = format!("{trace_path}.overlapped-result");
+            if rank == 0 {
+                let _ = std::fs::remove_file(&task_trace);
+                let _ = std::fs::remove_file(&result_trace);
+            }
+            world.barrier();
+
+            let callback_task_trace = task_trace.clone();
+            let callback_result_trace = result_trace.clone();
+            let overlapped = pmap(
+                world,
+                &domain,
+                PmapOptions {
+                    root: 0,
+                    batch_size: NonZeroUsize::new(1).unwrap(),
+                    local_mode: LocalMode::Sequential,
+                    prefetch: true,
+                },
+                (rank == 0).then(|| {
+                    vec![
+                        PrefetchTraceValue {
+                            value: 0,
+                            mark_on_deserialize: None,
+                            fail_on_deserialize: false,
+                        },
+                        PrefetchTraceValue {
+                            value: 1,
+                            mark_on_deserialize: None,
+                            fail_on_deserialize: false,
+                        },
+                        PrefetchTraceValue {
+                            value: 2,
+                            mark_on_deserialize: Some(task_trace.clone()),
+                            fail_on_deserialize: false,
+                        },
+                    ]
+                }),
+                |item| {
+                    if item.value <= 1 {
+                        wait_for_trace(
+                            &callback_task_trace,
+                            "task N+1 was not transferred while callback N ran",
+                        );
+                    }
+                    if item.value == 2 {
+                        wait_for_trace(
+                            &callback_result_trace,
+                            "result N was not transferred while callback N+1 ran",
+                        );
+                    }
+                    Ok::<_, String>(PrefetchTraceValue {
+                        value: item.value + 10,
+                        mark_on_deserialize: (item.value == 1)
+                            .then(|| callback_result_trace.clone()),
+                        fail_on_deserialize: false,
+                    })
+                },
+            )
+            .unwrap();
+            if rank == 0 {
+                assert_eq!(
+                    overlapped
+                        .unwrap()
+                        .into_iter()
+                        .map(|item| item.value)
+                        .collect::<Vec<_>>(),
+                    vec![10, 11, 12]
+                );
+                assert!(std::path::Path::new(&task_trace).exists());
+                assert!(std::path::Path::new(&result_trace).exists());
+                std::fs::remove_file(&task_trace).unwrap();
+                std::fs::remove_file(&result_trace).unwrap();
+            }
+            world.barrier();
+
+            let user_error_calls = AtomicUsize::new(0);
+            let user_error_task_trace = format!("{trace_path}.user-prefetched-task");
+            let user_error_callback_trace = format!("{trace_path}.user-prefetched-callback");
+            if rank == 0 {
+                let _ = std::fs::remove_file(&user_error_task_trace);
+                let _ = std::fs::remove_file(&user_error_callback_trace);
+            }
+            world.barrier();
+            let callback_task_trace = user_error_task_trace.clone();
+            let callback_ran_trace = user_error_callback_trace.clone();
+            let user_error = pmap(
+                world,
+                &domain,
+                PmapOptions {
+                    root: 0,
+                    batch_size: NonZeroUsize::new(1).unwrap(),
+                    local_mode: LocalMode::Sequential,
+                    prefetch: true,
+                },
+                (rank == 0).then(|| {
+                    vec![
+                        PrefetchTraceValue {
+                            value: 0,
+                            mark_on_deserialize: None,
+                            fail_on_deserialize: false,
+                        },
+                        PrefetchTraceValue {
+                            value: 1,
+                            mark_on_deserialize: None,
+                            fail_on_deserialize: false,
+                        },
+                        PrefetchTraceValue {
+                            value: 2,
+                            mark_on_deserialize: Some(user_error_task_trace.clone()),
+                            fail_on_deserialize: false,
+                        },
+                    ]
+                }),
+                |item| {
+                    if item.value <= 1 {
+                        wait_for_trace(
+                            &callback_task_trace,
+                            "prefetched task was not resident before current user error",
+                        );
+                    }
+                    user_error_calls.fetch_add(1, Ordering::Relaxed);
+                    match item.value {
+                        1 => Err("expected current-batch user error".to_owned()),
+                        2 => {
+                            std::fs::write(&callback_ran_trace, b"ran").unwrap();
+                            Err("later prefetched user error".to_owned())
+                        }
+                        _ => Ok(item.value),
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(user_error.kind(), PmapErrorKind::User);
+            assert_eq!(user_error.message(), "expected current-batch user error");
+            let local_user_error_calls = user_error_calls.load(Ordering::Relaxed) as i64;
+            let mut total_user_error_calls = 0_i64;
+            world.all_reduce_into(
+                &local_user_error_calls,
+                &mut total_user_error_calls,
+                SystemOperation::sum(),
+            );
+            assert_eq!(total_user_error_calls, 3);
+            if rank == 0 {
+                assert!(std::path::Path::new(&user_error_callback_trace).exists());
+                std::fs::remove_file(&user_error_task_trace).unwrap();
+                std::fs::remove_file(&user_error_callback_trace).unwrap();
+            }
+            world.barrier();
+            let after_user_error = pmap(
+                world,
+                &domain,
+                PmapOptions {
+                    prefetch: true,
+                    ..PmapOptions::default()
+                },
+                (rank == 0).then(|| vec![7_i32]),
+                |item| Ok::<_, String>(item + 1),
+            )
+            .unwrap();
+            if rank == 0 {
+                assert_eq!(after_user_error.unwrap(), vec![8]);
+            }
+
+            for failed_value in [1_i32, 2] {
+                let decode_trace = format!("{trace_path}.decode-{failed_value}");
+                if rank == 0 {
+                    let _ = std::fs::remove_file(&decode_trace);
+                }
+                world.barrier();
+                let callback_decode_trace = decode_trace.clone();
+                let decode_calls = AtomicUsize::new(0);
+                let decode_error = pmap(
+                    world,
+                    &domain,
+                    PmapOptions {
+                        root: 0,
+                        batch_size: NonZeroUsize::new(1).unwrap(),
+                        local_mode: LocalMode::Sequential,
+                        prefetch: true,
+                    },
+                    (rank == 0).then(|| {
+                        (0..3)
+                            .map(|value| PrefetchTraceValue {
+                                value,
+                                mark_on_deserialize: (value == failed_value)
+                                    .then(|| decode_trace.clone()),
+                                fail_on_deserialize: value == failed_value,
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                    |item| {
+                        if item.value == 0 || (failed_value == 2 && item.value == 1) {
+                            wait_for_trace(
+                                &callback_decode_trace,
+                                "decode-failure batch was not transferred while work ran",
+                            );
+                        }
+                        decode_calls.fetch_add(1, Ordering::Relaxed);
+                        Ok::<_, String>(item.value)
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(decode_error.kind(), PmapErrorKind::Wire);
+                let local_decode_calls = decode_calls.load(Ordering::Relaxed) as i64;
+                let mut total_decode_calls = 0_i64;
+                world.all_reduce_into(
+                    &local_decode_calls,
+                    &mut total_decode_calls,
+                    SystemOperation::sum(),
+                );
+                assert_eq!(total_decode_calls, i64::from(failed_value));
+                if rank == 0 {
+                    assert!(std::path::Path::new(&decode_trace).exists());
+                    std::fs::remove_file(&decode_trace).unwrap();
+                }
+                world.barrier();
+
+                let after_decode = pmap(
+                    world,
+                    &domain,
+                    PmapOptions {
+                        prefetch: true,
+                        ..PmapOptions::default()
+                    },
+                    (rank == 0).then(|| vec![failed_value]),
+                    |item| Ok::<_, String>(item + 10),
+                )
+                .unwrap();
+                if rank == 0 {
+                    assert_eq!(after_decode.unwrap(), vec![failed_value + 10]);
+                }
+            }
+        }
     }
 
     if world.size() > 1 {
