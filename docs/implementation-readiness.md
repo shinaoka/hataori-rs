@@ -11,7 +11,8 @@ This document records why the core design is implementable, what evidence is sti
 | Hataori core | Implementation-ready; independent review `Correct-to-merge` |
 | tenferro adapter foundation | Ready: tenferro-rs #1716 completed by PR #1717 |
 | tensor4all context/reconstruction adapter | Blocked on tensor4all-rs #663 |
-| P1 overlap, expanding queues, multiple domains | Deferred behind the evidence gates in `design.md` |
+| P1 bounded prefetch | Implementation-ready; independent review `Correct-to-merge` recorded in `docs/review-log.md` |
+| Expanding queues and multiple domains | Deferred behind separate evidence gates in `design.md` |
 
 Core implementation and release do not wait for the tensor adapter. Integrated tensor compatibility must not be claimed until both upstream contracts and the joint gate pass.
 
@@ -131,7 +132,7 @@ Commands become runnable when Step 1 creates `Cargo.toml`; they are merge gates 
 - empty input, world size one, ranks greater than items, batch one, and fixed batches greater than one;
 - reverse completion preserves input order and every successful index executes once;
 - a deterministic skew fixture records each dynamic assignment, sums item costs per lane, and proves the maximum dynamic lane cost is strictly lower than the maximum static-contiguous lane cost for the same items;
-- trace assertions prove `running <= 1`, `prefetched = 0`, one complete result per batch, and one STOP/DRAIN per remote rank; root dispatch while running is a state-preserving typed error;
+- with `prefetch = false`, trace assertions prove `running <= 1`, `prefetched = 0`, one complete result per batch, and one STOP/DRAIN per remote rank; root dispatch while running is a state-preserving typed error;
 - preflight mismatch or an agreed root outside `[0, world_size)` emits no scheduler traffic, and a largest possible error key at or above `i64::MAX` returns the typed preflight failure;
 - version, kind, source/tag, length/count, overflow, truncation, and trailing-byte failures are typed;
 - simultaneous user/wire failures select one signed deterministic key on every rank; after failure, every assigned completion is fully validated, valid values are discarded, and malformed metadata leaves state/results unchanged; a corrupt received batch ID releases the running lane only through its coordinator-pinned batch metadata before the next READY→STOP;
@@ -139,6 +140,16 @@ Commands become runnable when Step 1 creates `Cargo.toml`; they are merge gates 
 - root-local codec instrumentation remains zero for `pmap`, `broadcast`, `scatter`, and `gather`;
 - serial `map` and Rayon `Sequential`/`Inner` stop at the first callback error, while Rayon `Outer` evaluates every input exactly once and reports the lowest failed index after ordered collection;
 - callback panic takes the abort path rather than attempting recoverable drain.
+
+### P1 bounded-prefetch tests
+
+- MPI-only preflight collectively rejects `prefetch = true` before any callback or scheduler traffic;
+- both hybrid backends preserve the P0 path with `prefetch = false` and pass empty, one-item, ordered/exactly-once, more-ranks-than-items, and world-size-one calls with `prefetch = true`;
+- pure coordinator traces prove one running and at most one prefetched batch, transactional current-to-prefetched promotion, STOP-before-final-result ordering, and bounded two-batch residency;
+- an n=2 serialization handshake blocks the current root/remote callbacks until task N+1 is deserialized, then blocks callback N+1 until result N is deserialized on root, proving both overlap directions without timing inference;
+- current and prefetched callback/decode failures execute or reject exactly the assigned callbacks, preserve the lowest deterministic error, drain, and permit a later successful prefetched call;
+- a subprocess watchdog injects result-N serialization failure after callback N+1 starts and requires prompt init-thread `MPI_Abort(75)` without scoped join or drain;
+- every P1 MPI operation remains covered by the test-only `MPI_Is_thread_main` assertion and source scanner; borrowed callback data retains the existing hybrid compile-pass contract.
 
 ### Domain tests
 
@@ -162,7 +173,7 @@ Use compile-pass/compile-fail fixtures to prove:
 
 Do not add placeholders, traits, or partial implementations for:
 
-- `Isend`/`Irecv`, request pipelines, prefetch, progress threads, or async runtimes;
+- `Isend`/`Irecv`, arbitrary request pipelines or prefetch depth, progress threads, or async runtimes;
 - expanding/controller-generated queues or parked-READY machinery;
 - partial inner worker budgets;
 - multiple domains, dedicated coordinator CPUs, NUMA/topology discovery, or multithreaded providers;

@@ -25,11 +25,13 @@ adding tenferro to ordinary Hataori builds. See its
 
 ## Status
 
-Hataori's P0 core and tenferro-only adapter foundation are implemented. The
-tensor4all explicit-context and tensor-reconstruction layer remains blocked on
-[tensor4all-rs#663](https://github.com/tensor4all/tensor4all-rs/issues/663).
+Hataori's P0 core and tenferro-only adapter foundation are implemented. P1 adds
+an opt-in, default-off bounded prefetch of one batch per remote hybrid domain.
+The tensor4all explicit-context and tensor-reconstruction layer remains blocked
+on [tensor4all-rs#663](https://github.com/tensor4all/tensor4all-rs/issues/663).
 
 - [P0 design](docs/design.md)
+- [P1 bounded-prefetch design](docs/design/bounded-prefetch.md)
 - [Implementation readiness and validation matrix](docs/implementation-readiness.md)
 - [Review gate log](docs/review-log.md)
 - [Implementation tracker](https://github.com/shinaoka/hataori-rs/issues/1)

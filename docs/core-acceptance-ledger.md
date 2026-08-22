@@ -51,6 +51,20 @@ Open MPI and runs the same entry point. No prebuilt fixture or secret is used.
 | Same-rank codec count zero | filtered n=1 `size_one_root_paths_bypass_codec` for pmap and all placement helpers, using Serialize-always-error values and zero codec counters |
 | Broadcast/scatter/gather ownership and order | `check-placement.sh`: arbitrary roots, rank shards/order, UTF-8, empty, large values, reuse, encode/decode faults, size-one no-codec and `Rc` non-`Send` values |
 
+## P1 bounded prefetch
+
+| Acceptance criterion | Evidence |
+|---|---|
+| Opt-in/default-off and P0 preservation | `PmapOptions::default`; unchanged no-prefetch worker loop; existing hybrid matrix still runs every local mode with `prefetch = false` |
+| MPI-only rejection before execution | both MPI-only smoke examples request prefetch, observe collective `Preflight`, and reduce callback count to zero |
+| Capacity and promotion | scheduler `bounded_prefetch_promotes_in_order_and_never_exceeds_one` and STOP/error/protocol companion tests |
+| Task and result overlap | n=2 hybrid serialization handshake proves task N+1 is decoded during callback N and result N is decoded during callback N+1 |
+| Ordered exactly-once execution | prefetched 16-item call reduces callback count and checks root order under both backends at n=1/2/4 |
+| Failure, drain, and reuse | n=2 hybrid fixtures cover current+prefetched user errors, current/prefetched input decode failures, deterministic first error, assigned callback count, and successful reuse |
+| Live-job transfer failure abort | subprocess fixture fails result-N serialization after callback N+1 starts and requires prompt init-thread `MPI_Abort(75)` before scoped join |
+| FUNNELED and scoped bounds | all new MPI sites use `mpi_call!`; source scanner and test builds enforce `MPI_Is_thread_main`; the remote worker mirrors the existing `in_place_scope` borrowed-job mechanism |
+| Bounded memory | scheduler state structurally stores one current plus at most one prefetched `RunningMeta`; worker retains at most current outcome plus one next batch/outcome |
+
 ## MPI thread boundary
 
 `mpi_call!(...)` surrounds every Hataori-owned MPI operation in `pmap.rs` and

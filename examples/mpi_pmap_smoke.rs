@@ -16,6 +16,7 @@ fn options(batch_size: usize) -> PmapOptions {
         root: 0,
         batch_size: NonZeroUsize::new(batch_size).unwrap(),
         local_mode: LocalMode::Sequential,
+        prefetch: false,
     }
 }
 
@@ -47,6 +48,30 @@ fn main() {
     if let Some(values) = empty {
         assert!(values.is_empty());
     }
+
+    let rejected_calls = std::cell::Cell::new(0_i32);
+    let rejected = pmap(
+        &world,
+        &domain,
+        PmapOptions {
+            prefetch: true,
+            ..options(1)
+        },
+        (rank == 0).then(|| vec![1_i32]),
+        |item| {
+            rejected_calls.set(rejected_calls.get() + 1);
+            Ok::<_, String>(item)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(rejected.kind(), PmapErrorKind::Preflight);
+    let mut total_rejected_calls = 0_i32;
+    world.all_reduce_into(
+        &rejected_calls.get(),
+        &mut total_rejected_calls,
+        mpi_api::collective::SystemOperation::sum(),
+    );
+    assert_eq!(total_rejected_calls, 0);
 
     let one_calls = std::cell::Cell::new(0_i32);
     let one = pmap(

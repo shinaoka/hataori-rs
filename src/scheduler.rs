@@ -127,7 +127,11 @@ struct RunningMeta {
 
 enum LaneState {
     Idle,
-    Running(RunningMeta),
+    Running {
+        current: RunningMeta,
+        prefetched: Option<RunningMeta>,
+        stopping: bool,
+    },
     Stopped,
     Drained,
 }
@@ -136,7 +140,7 @@ impl LaneState {
     fn kind(&self) -> LaneStateKind {
         match self {
             Self::Idle => LaneStateKind::Idle,
-            Self::Running(_) => LaneStateKind::Running,
+            Self::Running { .. } => LaneStateKind::Running,
             Self::Stopped => LaneStateKind::Stopped,
             Self::Drained => LaneStateKind::Drained,
         }
@@ -198,15 +202,27 @@ pub(crate) struct Coordinator<T, U> {
     next_batch_id: BatchId,
     root: LaneState,
     remotes: BTreeMap<i32, LaneState>,
+    prefetch: bool,
     failed: bool,
 }
 
 impl<T, U> Coordinator<T, U> {
+    #[cfg(test)]
     pub(crate) fn new(
         root_rank: i32,
         remote_ranks: Vec<i32>,
         items: Vec<T>,
         batch_size: NonZeroUsize,
+    ) -> Result<Self, SchedulerError> {
+        Self::new_with_prefetch(root_rank, remote_ranks, items, batch_size, false)
+    }
+
+    pub(crate) fn new_with_prefetch(
+        root_rank: i32,
+        remote_ranks: Vec<i32>,
+        items: Vec<T>,
+        batch_size: NonZeroUsize,
+        prefetch: bool,
     ) -> Result<Self, SchedulerError> {
         if root_rank < 0 {
             return Err(SchedulerError::InvalidRoot);
@@ -239,24 +255,60 @@ impl<T, U> Coordinator<T, U> {
             next_batch_id: BatchId::ZERO,
             root: LaneState::Idle,
             remotes,
+            prefetch,
             failed: false,
         })
     }
 
     pub(crate) fn on_remote_ready(&mut self, rank: i32) -> Result<Dispatch<T>, SchedulerError> {
-        let state = self.remotes.get(&rank).ok_or(SchedulerError::UnknownRank)?;
-        if state.kind() != LaneStateKind::Idle {
-            return Err(SchedulerError::WrongLaneState);
-        }
+        let prefetch_request = match self.remotes.get(&rank) {
+            Some(LaneState::Idle) => false,
+            Some(LaneState::Running {
+                prefetched: None,
+                stopping: false,
+                ..
+            }) if self.prefetch => true,
+            Some(_) => return Err(SchedulerError::WrongLaneState),
+            None => return Err(SchedulerError::UnknownRank),
+        };
 
         if self.failed || self.pending.is_empty() {
-            self.remotes.insert(rank, LaneState::Stopped);
+            if prefetch_request {
+                let state = self
+                    .remotes
+                    .get_mut(&rank)
+                    .ok_or(SchedulerError::UnknownRank)?;
+                match state {
+                    LaneState::Running { stopping, .. } => *stopping = true,
+                    _ => unreachable!("prefetch request state was validated"),
+                }
+            } else {
+                self.remotes.insert(rank, LaneState::Stopped);
+            }
             return Ok(Dispatch::Stop);
         }
 
         let batch = self.make_batch()?.expect("pending work was checked above");
         let metadata = Self::metadata(&batch);
-        self.remotes.insert(rank, LaneState::Running(metadata));
+        if prefetch_request {
+            let state = self
+                .remotes
+                .get_mut(&rank)
+                .ok_or(SchedulerError::UnknownRank)?;
+            match state {
+                LaneState::Running { prefetched, .. } => *prefetched = Some(metadata),
+                _ => unreachable!("prefetch request state was validated"),
+            }
+        } else {
+            self.remotes.insert(
+                rank,
+                LaneState::Running {
+                    current: metadata,
+                    prefetched: None,
+                    stopping: false,
+                },
+            );
+        }
         Ok(Dispatch::Task(batch))
     }
 
@@ -274,7 +326,11 @@ impl<T, U> Coordinator<T, U> {
 
         let batch = self.make_batch()?.expect("pending work was checked above");
         let metadata = Self::metadata(&batch);
-        self.root = LaneState::Running(metadata);
+        self.root = LaneState::Running {
+            current: metadata,
+            prefetched: None,
+            stopping: false,
+        };
         Ok(Some(batch))
     }
 
@@ -284,7 +340,11 @@ impl<T, U> Coordinator<T, U> {
         results: Vec<ItemResult<U>>,
     ) -> Result<CompletionMeta, SchedulerError> {
         let metadata = match &self.root {
-            LaneState::Running(metadata) => metadata,
+            LaneState::Running {
+                current,
+                prefetched: None,
+                stopping: false,
+            } => current,
             _ => return Err(SchedulerError::WrongLaneState),
         };
         self.validate_completion(metadata, batch_id, &results)?;
@@ -308,17 +368,13 @@ impl<T, U> Coordinator<T, U> {
         batch_id: BatchId,
         results: Vec<ItemResult<U>>,
     ) -> Result<CompletionMeta, SchedulerError> {
-        let metadata = match self.remotes.get(&rank) {
-            Some(LaneState::Running(metadata)) => metadata,
-            Some(_) => return Err(SchedulerError::WrongLaneState),
-            None => return Err(SchedulerError::UnknownRank),
-        };
+        let metadata = self.remote_current(rank)?;
         self.validate_completion(metadata, batch_id, &results)?;
         let completion = CompletionMeta {
             lane: Lane::Remote(rank),
             batch_id,
         };
-        self.remotes.insert(rank, LaneState::Idle);
+        self.advance_remote(rank)?;
         if !self.failed {
             for result in results {
                 let original_index = result.original_index();
@@ -333,7 +389,11 @@ impl<T, U> Coordinator<T, U> {
         batch_id: BatchId,
     ) -> Result<CompletionMeta, SchedulerError> {
         let metadata = match &self.root {
-            LaneState::Running(metadata) => metadata,
+            LaneState::Running {
+                current,
+                prefetched: None,
+                stopping: false,
+            } => current,
             _ => return Err(SchedulerError::WrongLaneState),
         };
         if metadata.batch_id != batch_id {
@@ -353,15 +413,10 @@ impl<T, U> Coordinator<T, U> {
         rank: i32,
         batch_id: BatchId,
     ) -> Result<CompletionMeta, SchedulerError> {
-        let metadata = match self.remotes.get(&rank) {
-            Some(LaneState::Running(metadata)) => metadata,
-            Some(_) => return Err(SchedulerError::WrongLaneState),
-            None => return Err(SchedulerError::UnknownRank),
-        };
-        if metadata.batch_id != batch_id {
+        if self.remote_current(rank)?.batch_id != batch_id {
             return Err(SchedulerError::BatchMismatch);
         }
-        self.remotes.insert(rank, LaneState::Idle);
+        self.advance_remote(rank)?;
         self.failed = true;
         self.pending.clear();
         Ok(CompletionMeta {
@@ -374,18 +429,67 @@ impl<T, U> Coordinator<T, U> {
         &mut self,
         rank: i32,
     ) -> Result<CompletionMeta, SchedulerError> {
-        let batch_id = match self.remotes.get(&rank) {
-            Some(LaneState::Running(metadata)) => metadata.batch_id,
-            Some(_) => return Err(SchedulerError::WrongLaneState),
-            None => return Err(SchedulerError::UnknownRank),
-        };
-        self.remotes.insert(rank, LaneState::Idle);
+        let batch_id = self.remote_current(rank)?.batch_id;
+        self.advance_remote(rank)?;
         self.failed = true;
         self.pending.clear();
         Ok(CompletionMeta {
             lane: Lane::Remote(rank),
             batch_id,
         })
+    }
+
+    fn remote_current(&self, rank: i32) -> Result<&RunningMeta, SchedulerError> {
+        match self.remotes.get(&rank) {
+            Some(LaneState::Running { current, .. }) => Ok(current),
+            Some(_) => Err(SchedulerError::WrongLaneState),
+            None => Err(SchedulerError::UnknownRank),
+        }
+    }
+
+    fn advance_remote(&mut self, rank: i32) -> Result<(), SchedulerError> {
+        let state = self
+            .remotes
+            .get_mut(&rank)
+            .ok_or(SchedulerError::UnknownRank)?;
+        let valid = matches!(
+            state,
+            LaneState::Running {
+                prefetched: Some(_),
+                stopping: false,
+                ..
+            } | LaneState::Running {
+                prefetched: None,
+                ..
+            }
+        );
+        if !valid {
+            return Err(SchedulerError::WrongLaneState);
+        }
+        let prior = std::mem::replace(state, LaneState::Idle);
+        *state = match prior {
+            LaneState::Running {
+                prefetched: Some(current),
+                stopping: false,
+                ..
+            } => LaneState::Running {
+                current,
+                prefetched: None,
+                stopping: false,
+            },
+            LaneState::Running {
+                prefetched: None,
+                stopping: true,
+                ..
+            } => LaneState::Stopped,
+            LaneState::Running {
+                prefetched: None,
+                stopping: false,
+                ..
+            } => LaneState::Idle,
+            _ => unreachable!("remote running state was validated"),
+        };
+        Ok(())
     }
 
     #[cfg(test)]
@@ -441,6 +545,22 @@ impl<T, U> Coordinator<T, U> {
                 .values()
                 .filter(|state| state.kind() == LaneStateKind::Running)
                 .count()
+    }
+
+    #[cfg(test)]
+    fn prefetched_count(&self) -> usize {
+        self.remotes
+            .values()
+            .filter(|state| {
+                matches!(
+                    state,
+                    LaneState::Running {
+                        prefetched: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     #[cfg(test)]
@@ -665,6 +785,117 @@ mod tests {
             .unwrap();
         assert_eq!(coordinator.running_count(), 0);
         assert_eq!(coordinator.pending_count(), 1);
+    }
+
+    #[test]
+    fn bounded_prefetch_promotes_in_order_and_never_exceeds_one() {
+        let mut coordinator =
+            Coordinator::new_with_prefetch(0, vec![1], vec![10, 20, 30], one(), true).unwrap();
+        let current = batch(coordinator.on_remote_ready(1).unwrap());
+        let prefetched = batch(coordinator.on_remote_ready(1).unwrap());
+        assert_eq!(indices(current), vec![0]);
+        assert_eq!(indices(prefetched), vec![1]);
+        assert_eq!(coordinator.running_count(), 1);
+        assert_eq!(coordinator.prefetched_count(), 1);
+        assert_eq!(coordinator.pending_count(), 1);
+        assert!(matches!(
+            coordinator.on_remote_ready(1),
+            Err(SchedulerError::WrongLaneState)
+        ));
+
+        coordinator
+            .on_remote_success(1, BatchId(0), vec![result(0, 100)])
+            .unwrap();
+        assert_eq!(coordinator.prefetched_count(), 0);
+        let third = batch(coordinator.on_remote_ready(1).unwrap());
+        assert_eq!(indices(third), vec![2]);
+        assert_eq!(coordinator.prefetched_count(), 1);
+        coordinator
+            .on_remote_success(1, BatchId(1), vec![result(1, 200)])
+            .unwrap();
+        assert_eq!(coordinator.prefetched_count(), 0);
+        assert!(matches!(
+            coordinator.on_remote_ready(1).unwrap(),
+            Dispatch::Stop
+        ));
+        coordinator
+            .on_remote_success(1, BatchId(2), vec![result(2, 300)])
+            .unwrap();
+        coordinator.on_remote_drain(1).unwrap();
+        assert!(coordinator.next_root_batch().unwrap().is_none());
+        assert_eq!(coordinator.into_results().unwrap(), vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn bounded_prefetch_error_and_protocol_error_retain_next_batch_for_drain() {
+        for protocol_error in [false, true] {
+            let mut coordinator = Coordinator::<i32, i32>::new_with_prefetch(
+                0,
+                vec![1],
+                vec![10, 20, 30],
+                one(),
+                true,
+            )
+            .unwrap();
+            let current = batch(coordinator.on_remote_ready(1).unwrap());
+            let prefetched = batch(coordinator.on_remote_ready(1).unwrap());
+            if !protocol_error {
+                assert_eq!(
+                    coordinator
+                        .on_remote_error(1, BatchId::from_raw(999))
+                        .unwrap_err(),
+                    SchedulerError::BatchMismatch
+                );
+                assert_eq!(coordinator.running_count(), 1);
+                assert_eq!(coordinator.prefetched_count(), 1);
+                assert_eq!(coordinator.pending_count(), 1);
+            }
+            let completion = if protocol_error {
+                coordinator.on_remote_protocol_error(1).unwrap()
+            } else {
+                coordinator.on_remote_error(1, current.id()).unwrap()
+            };
+            assert_eq!(completion.batch_id(), current.id());
+            assert!(coordinator.failed());
+            assert_eq!(coordinator.pending_count(), 0);
+            assert_eq!(coordinator.running_count(), 1);
+            assert_eq!(coordinator.prefetched_count(), 0);
+            assert!(matches!(
+                coordinator.on_remote_ready(1).unwrap(),
+                Dispatch::Stop
+            ));
+            coordinator
+                .on_remote_success(1, prefetched.id(), vec![result(1, 200)])
+                .unwrap();
+            assert_eq!(coordinator.result_count(), 0);
+            coordinator.on_remote_drain(1).unwrap();
+            assert!(coordinator.next_root_batch().unwrap().is_none());
+            assert_eq!(
+                coordinator.into_results().unwrap_err(),
+                SchedulerError::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_prefetch_stop_waits_for_current_result_before_drain() {
+        let mut coordinator =
+            Coordinator::new_with_prefetch(0, vec![1], vec![10], one(), true).unwrap();
+        let current = batch(coordinator.on_remote_ready(1).unwrap());
+        assert!(matches!(
+            coordinator.on_remote_ready(1).unwrap(),
+            Dispatch::Stop
+        ));
+        assert_eq!(
+            coordinator.on_remote_drain(1).unwrap_err(),
+            SchedulerError::WrongLaneState
+        );
+        coordinator
+            .on_remote_success(1, current.id(), vec![result(0, 100)])
+            .unwrap();
+        coordinator.on_remote_drain(1).unwrap();
+        assert!(coordinator.next_root_batch().unwrap().is_none());
+        assert_eq!(coordinator.into_results().unwrap(), vec![100]);
     }
 
     #[test]
