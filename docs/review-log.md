@@ -226,3 +226,20 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 - CI remediation: the first Task #19 workflow run reached the MPI matrix but Open MPI rejected n=4 on a two-slot runner. All OpenMPI-only launch paths now add `--oversubscribe` without reducing rank coverage; the reviewer confirmed the delta **Correct-to-merge** and the full local core matrix passed again.
+
+### Task #20a — tenferro adapter foundation
+
+- Design slice: `docs/design/tenferro-adapter.md`
+- Implementer: Luna (`high`, write-capable) performed the initial repository/API pass but timed out before edits; the parent agent completed the same approved implementation slice.
+- Pre-implementation reviewer: `reviewer-flash-opencode-go` (read-only, `high`)
+- Initial verdict: **Changes requested**
+- Corrections: replaced the proposed admission-state observation with an explicit admitted-`Inner` caller contract plus tenferro's shared hard entry guard; documented the one public pool-handle seam, guard-enforced `Outer` rejection, exact workspace/MSRV mechanics, exact Faer and no-arbiter source evidence, and non-vacuous thread observations. The reviewer's apparent missing-upstream-API findings came from its stale local tenferro branch and were rechecked against exact merge commit `a21a4c602fc6700b9bc0c3f1b14ebd19b9d7ec45`.
+- Corrected pre-implementation verdict: **Correct-to-merge**
+- Implementation discovery: exact-revision runtime testing showed tenferro's caller-managed collision guard panics instead of returning a typed error. The design added a nonblocking adapter-local RAII entry gate solely to convert ordinary concurrent/recursive adapter entry into typed `ConcurrentEntry`; it carries no capacity/admission policy and leaves Hataori's running slot as the sole coarse admission.
+- Design-delta reviewer verdict: **Correct-to-merge**
+- Ownership preflight: the borrowed constructor could create independently guarded adapters for one `Domain`. `TenferroDomain` now consumes and owns the non-`Clone` domain and exposes only `domain()`, giving one adapter gate per domain value without core state or a registry.
+- Ownership-delta reviewer verdict: **Correct-to-merge**
+- Verification: `scripts/check-tenferro.sh` passed (adapter tests/doctests, all-target clippy `-D warnings`, docs `-D warnings`, exact dependency boundaries, core Rust 1.85 default/Rayon); `scripts/check-core.sh` also passed its complete six-feature, MPI/rsmpi-rt n=1/2/4, watchdog, compile-boundary, lint, doc, and MSRV matrix.
+- Post-implementation reviewer: `reviewer-flash-opencode-go` (read-only, `high`; bounded finalization after full-diff inspection exhausted its reporting turn budget)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none

@@ -1,9 +1,10 @@
 # Hataori P0 core acceptance ledger
 
 This ledger maps the core-only acceptance contract in `docs/design.md` §16 and
-`docs/implementation-readiness.md` §5 to checked evidence. The optional tensor
-adapter and the tenferro/tensor4all integration criteria are **not** claimed by
-this ledger; they are Todo #20 and remain blocked on their upstream contracts.
+`docs/implementation-readiness.md` §5 to checked evidence. Adapter claims remain
+outside this ledger: Phase 20a tenferro evidence is recorded in
+`docs/tenferro-acceptance-ledger.md`, while the tensor4all layer remains blocked
+on tensor4all-rs#663.
 
 ## Reproducible entry point
 

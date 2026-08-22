@@ -1,0 +1,13 @@
+[package]
+name = "hataori-tenferro"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+publish = false
+description = "Caller-managed tenferro CPU integration for Hataori domains"
+
+[dependencies]
+hataori = { path = "../..", features = ["rayon"] }
+rayon = "1.10"
+tenferro-cpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "a21a4c602fc6700b9bc0c3f1b14ebd19b9d7ec45", default-features = false, features = ["cpu-faer"] }
+tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "a21a4c602fc6700b9bc0c3f1b14ebd19b9d7ec45" }

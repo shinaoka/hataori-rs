@@ -9,7 +9,8 @@ This document records why the core design is implementable, what evidence is sti
 | Scope | Readiness |
 |---|---|
 | Hataori core | Implementation-ready; independent review `Correct-to-merge` |
-| Optional tensor adapter | Blocked on tenferro-rs #1716 and tensor4all-rs #663 |
+| tenferro adapter foundation | Ready: tenferro-rs #1716 completed by PR #1717 |
+| tensor4all context/reconstruction adapter | Blocked on tensor4all-rs #663 |
 | P1 overlap, expanding queues, multiple domains | Deferred behind the evidence gates in `design.md` |
 
 Core implementation and release do not wait for the tensor adapter. Integrated tensor compatibility must not be claimed until both upstream contracts and the joint gate pass.
@@ -90,10 +91,10 @@ Unsigned `MPI_MIN` is avoided because released implementations produced wrong an
 
 ### Tensor prerequisites
 
-- tenferro caller-managed admission and same-pool execution: <https://github.com/tensor4all/tenferro-rs/issues/1716>
-- tensor4all explicit plain/graph/eager-AD contexts: <https://github.com/tensor4all/tensor4all-rs/issues/663>
+- tenferro caller-managed admission and same-pool execution: <https://github.com/tensor4all/tenferro-rs/issues/1716> — completed by merged PR #1717
+- tensor4all explicit plain/graph/eager-AD contexts: <https://github.com/tensor4all/tensor4all-rs/issues/663> — still open
 
-Both remain external blockers for the adapter only.
+Only the tensor4all context/reconstruction phase remains externally blocked.
 
 ## 4. Minimal implementation order
 
@@ -104,7 +105,9 @@ Both remain external blockers for the adapter only.
 5. **MPI-only `pmap`** — private communicator, collective preflight, dynamic scheduler, synchronous root participation, drain and reuse.
 6. **Hybrid `pmap`** — `in_place_scope`, local completion channel, fair `MPI_Iprobe` loop, rendezvous progress.
 7. **Collective placement helpers** — root-coordinated `broadcast`, `scatter`, and `gather` on the same private wire rules.
-8. **Tensor adapter** — only after both upstream issues land and known-good revisions are pinned.
+8. **tenferro adapter foundation** — pin merged PR #1717, bind the exact Hataori pool to caller-managed Faer execution, and retain core dependency isolation.
+9. **tensor4all context/reconstruction adapter** — only after #663 lands at a known-good revision.
+10. **Joint integration** — run the three-repository MPI and thread-ownership gate after both adapter layers exist.
 
 Each numbered item is an independently reviewable implementation task. Do not combine scheduler, hybrid execution, affinity, and tensor integration into one initial change.
 
