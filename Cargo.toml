@@ -15,6 +15,7 @@ default = []
 rayon = ["dep:rayon", "dep:libc"]
 mpi = ["dep:mpi-upstream", "dep:serde", "dep:bincode"]
 rsmpi-rt = ["dep:mpi-runtime", "dep:serde", "dep:bincode"]
+tenferro = ["dep:tenferro-tensor"]
 
 [dependencies]
 rayon = { version = "1.10", optional = true }
@@ -22,6 +23,7 @@ mpi-upstream = { package = "mpi", version = "=0.8.1", default-features = false, 
 mpi-runtime = { package = "mpi", git = "https://github.com/tensor4all/rsmpi-rt", rev = "6db6a2d6f96115b17c9a925e53ce719797c15dbb", default-features = false, features = ["mpi-rt-sys-backend"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "2", default-features = false, features = ["serde", "std"], optional = true }
+tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "a21a4c602fc6700b9bc0c3f1b14ebd19b9d7ec45", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
@@ -45,6 +47,14 @@ required-features = ["mpi"]
 [[example]]
 name = "mpi_pi_pmap"
 required-features = ["mpi"]
+
+[[example]]
+name = "mpi_mandelbrot_raw"
+required-features = ["mpi", "tenferro"]
+
+[[example]]
+name = "mpi_mandelbrot_pmap"
+required-features = ["mpi", "tenferro"]
 
 [[example]]
 name = "rsmpi_rt_placement_smoke"
