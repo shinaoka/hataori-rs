@@ -2,11 +2,45 @@ use hataori::{pmap, Domain, PmapOptions};
 use mandelbrot_common::{tensor_from_columns, Param};
 use mpi_upstream as mpi_api;
 use mpi_upstream::traits::Communicator;
+use std::env;
 use std::num::NonZeroUsize;
 use std::time::Instant;
 
 #[path = "support/mandelbrot_common.rs"]
 mod mandelbrot_common;
+
+/// Parse an optional `--batch-factor N` command-line argument.
+///
+/// The batch size used by pmap is `width / (world_size * factor)`, clamped to
+/// at least [`MIN_BATCH_COLUMNS`] columns. A larger factor produces smaller
+/// batches and therefore finer load balancing, but increases
+/// scheduling/communication overhead. The default of 32 measured fastest on a
+/// 4096-column image across 2-8 ranks; larger factors start to pay per-batch
+/// protocol overhead, smaller factors coarsen the scheduling granularity.
+fn batch_factor_from_args() -> usize {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--batch-factor" {
+            if let Some(value) = args.next() {
+                return value.parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid --batch-factor value: {value}");
+                    std::process::exit(1);
+                });
+            }
+        }
+    }
+    32
+}
+
+/// Smallest allowed batch, in columns.
+///
+/// A column is `height` i64 values (32 KiB at 4096 rows), so a 16-column
+/// batch is a 512 KiB message: large enough to amortize the per-batch
+/// handshake and serialization. Without this floor the formula collapses to a
+/// single column per batch once `world_size > width / factor`, turning every
+/// column into a full request/response round trip and breaking scaling with
+/// `-n`.
+const MIN_BATCH_COLUMNS: usize = 16;
 
 fn run_one<C: mpi_api::traits::Communicator>(
     world: &C,
@@ -19,8 +53,20 @@ fn run_one<C: mpi_api::traits::Communicator>(
     let height = param.height;
 
     // Rank 0 owns the list of column indices; pmap distributes them across all ranks.
-    // Use a batch size that creates several batches per rank to amortize wire overhead.
-    let batch_size = NonZeroUsize::new((width / ((size as usize).max(1) * 8)).max(1)).unwrap();
+    // Target `--batch-factor` (default 32) batches per rank so the dynamic
+    // scheduler can rebalance uneven column costs, while MIN_BATCH_COLUMNS
+    // bounds the total number of batches at large job counts.
+    let factor = batch_factor_from_args();
+    let batch_size = NonZeroUsize::new(
+        (width / ((size as usize).max(1) * factor.max(1)))
+            .max(MIN_BATCH_COLUMNS)
+            .min(width),
+    )
+    .unwrap();
+    if rank == 0 {
+        mandelbrot_common::print_info("Batch factor", factor);
+        mandelbrot_common::print_info("Batch size", batch_size.get());
+    }
     let input = (rank == 0).then(|| (0..width).collect::<Vec<usize>>());
     let columns = pmap(
         world,

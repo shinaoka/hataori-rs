@@ -1237,22 +1237,40 @@ where
             break;
         }
 
-        let (source, value) = receive_any_header(comm)?;
-        process_remote_header(
-            comm,
-            &mut scheduler,
-            source,
-            value,
-            &mut RootErrorState {
-                call_task_key,
-                rank,
-                size,
-                local_key: &mut local_key,
-                local_error: &mut local_error,
-            },
-        )?;
-
-        if !scheduler.is_finished() {
+        // Serve every worker whose message is already pending. The root must
+        // not race the workers for batches: taking one batch per received
+        // message makes it execute the majority of the work itself, and rank 0
+        // becomes the serialized bottleneck that prevents strong scaling with
+        // `-n`. The root therefore serves first and loops back while messages
+        // keep arriving; it computes a local batch only when the pending
+        // queue is empty (every worker is busy computing), and then blocks
+        // for the next message to pace itself instead of taking another batch
+        // back-to-back.
+        let mut served = 0usize;
+        while mpi_call!(comm.any_process().immediate_probe_with_tag(HEADER_TAG)).is_some() {
+            let (source, value) = receive_any_header(comm)?;
+            process_remote_header(
+                comm,
+                &mut scheduler,
+                source,
+                value,
+                &mut RootErrorState {
+                    call_task_key,
+                    rank,
+                    size,
+                    local_key: &mut local_key,
+                    local_error: &mut local_error,
+                },
+            )?;
+            served += 1;
+        }
+        // `is_finished` only turns true once every worker has drained; the
+        // top-of-loop break then terminates the loop, so never block on a
+        // message after completion.
+        if scheduler.is_finished() {
+            continue;
+        }
+        if served == 0 {
             let _ = execute_root_batch(
                 comm,
                 &mut scheduler,
@@ -1262,6 +1280,28 @@ where
                 &mut local_key,
                 &mut local_error,
             )?;
+            // `execute_root_batch` may have just stopped the root lane (no
+            // pending work left, or the run failed); re-check completion
+            // before blocking, or the root waits forever for a Drain that
+            // already arrived.
+            if scheduler.is_finished() {
+                continue;
+            }
+            let (source, value) = receive_any_header(comm)?;
+            process_remote_header(
+                comm,
+                &mut scheduler,
+                source,
+                value,
+                &mut RootErrorState {
+                    call_task_key,
+                    rank,
+                    size,
+                    local_key: &mut local_key,
+                    local_error: &mut local_error,
+                },
+            )?;
+            continue;
         }
     }
 
