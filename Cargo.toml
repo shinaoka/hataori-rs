@@ -62,3 +62,11 @@ required-features = ["mpi", "tenferro"]
 [[example]]
 name = "rsmpi_rt_placement_smoke"
 required-features = ["rsmpi-rt"]
+
+[[example]]
+name = "rayon_mandelbrot"
+required-features = ["rayon", "tenferro"]
+
+[[example]]
+name = "mpi_mandelbrot_hybrid"
+required-features = ["mpi", "rayon", "tenferro"]
