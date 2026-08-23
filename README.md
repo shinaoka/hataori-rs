@@ -23,6 +23,37 @@ whole-domain `Inner` callback to tenferro's caller-managed Faer backend without
 adding tenferro to ordinary Hataori builds. See its
 [design and usage contract](docs/design/tenferro-adapter.md).
 
+### MPI backend prerequisites
+
+The `mpi` feature links against the system MPI implementation at build time. On macOS, install Open MPI first, for example with Homebrew:
+
+```bash
+brew install open-mpi
+```
+
+Then verify that `mpicc` and `mpiexec` are on your `PATH` before building with `--features mpi`.
+
+## Running the examples
+
+Build and run the MPI smoke tests with `mpiexec`. The examples are silent on success because they verify behavior through assertions.
+
+### Upstream MPI backend (`mpi`)
+
+```bash
+cargo build --example mpi_pmap_smoke --no-default-features --features mpi,rayon
+mpiexec -n 4 target/debug/examples/mpi_pmap_smoke && echo "pmap smoke OK"
+
+cargo build --example mpi_placement_smoke --no-default-features --features mpi
+mpiexec -n 4 target/debug/examples/mpi_placement_smoke && echo "placement smoke OK"
+```
+
+### Runtime-loaded MPI backend (`rsmpi-rt`)
+
+```bash
+cargo build --example rsmpi_rt_pmap_smoke --no-default-features --features rsmpi-rt,rayon
+MPI_RT_LIB=/absolute/path/to/libmpiwrapper.so mpiexec -n 4 target/debug/examples/rsmpi_rt_pmap_smoke && echo "pmap smoke OK"
+```
+
 ## Status
 
 Hataori's P0 core and tenferro-only adapter foundation are implemented. P1 adds
