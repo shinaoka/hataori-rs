@@ -1280,6 +1280,13 @@ where
                 &mut local_key,
                 &mut local_error,
             )?;
+            // `execute_root_batch` may have just stopped the root lane (no
+            // pending work left, or the run failed); re-check completion
+            // before blocking, or the root waits forever for a Drain that
+            // already arrived.
+            if scheduler.is_finished() {
+                continue;
+            }
             let (source, value) = receive_any_header(comm)?;
             process_remote_header(
                 comm,
