@@ -122,6 +122,11 @@ fn main() {
             format!("{}%", (transfer_time / total_time * 100.0).round()),
         );
         mandelbrot_common::print_info("  Max iteration count", max_val);
+
+        let png_path = "mandelbrot_raw.png";
+        mandelbrot_common::print_info("Saving PNG", png_path);
+        mandelbrot_common::save_png(&result, png_path);
+
         mandelbrot_common::print_info("Done!", "");
     } else {
         mandelbrot_common::print_info(

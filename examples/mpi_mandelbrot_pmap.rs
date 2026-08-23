@@ -74,6 +74,11 @@ fn main() {
         mandelbrot_common::print_info("  Total time", format!("{total_time} seconds"));
         mandelbrot_common::print_info("  Transfer ratio", "N/A (included in total)");
         mandelbrot_common::print_info("  Max iteration count", max_val);
+
+        let png_path = "mandelbrot_pmap.png";
+        mandelbrot_common::print_info("Saving PNG", png_path);
+        mandelbrot_common::save_png(&result, png_path);
+
         mandelbrot_common::print_info("Done!", "");
     }
 }

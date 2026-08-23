@@ -28,6 +28,9 @@ tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "a2
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
 
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [[example]]
 name = "mpi_pmap_smoke"
 required-features = ["mpi"]

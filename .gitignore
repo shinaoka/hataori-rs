@@ -1,3 +1,5 @@
 target/
 Cargo.lock
 .codegraph/
+mandelbrot_raw.png
+mandelbrot_pmap.png

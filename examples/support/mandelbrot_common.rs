@@ -77,6 +77,38 @@ pub fn tensor_from_columns(width: usize, height: usize, data: Vec<i64>) -> Tenso
     Tensor::from_vec_col_major(vec![width, height], data).expect("tensor shape must match data")
 }
 
+/// Save a tenferro tensor as a grayscale PNG image.
+///
+/// The tensor is assumed to have shape `[width, height]` in column-major order.
+/// The result is transposed to row-major image layout and normalized by the
+/// maximum value, matching Julia's `gray = colorview(Gray, normalized')`.
+pub fn save_png(tensor: &Tensor, path: &str) {
+    let slice = tensor
+        .as_slice::<i64>()
+        .expect("tensor must be contiguous i64");
+    let shape = tensor.shape();
+    assert_eq!(shape.len(), 2, "tensor must be 2-D");
+    let width = shape[0];
+    let height = shape[1];
+
+    let max_val = slice.iter().copied().max().unwrap_or(1).max(1);
+
+    // Convert column-major tensor data to row-major grayscale image data.
+    let mut img_data = vec![0_u8; width * height];
+    for x in 0..width {
+        for y in 0..height {
+            let src = x * height + y;
+            let dst = y * width + x;
+            let norm = (slice[src] as f64 / max_val as f64 * 255.0) as u8;
+            img_data[dst] = norm;
+        }
+    }
+
+    let img = image::GrayImage::from_raw(width as u32, height as u32, img_data)
+        .expect("image dimensions must match data length");
+    img.save(path).expect("PNG write must succeed");
+}
+
 /// Print an informational line, matching Julia's `@info` style.
 pub fn print_info<N: std::fmt::Display>(label: &str, value: N) {
     println!("[ Info: {label} ] {value}");
