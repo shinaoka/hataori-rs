@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::time::Instant;
 
 /// Euclidean algorithm for the greatest common divisor.

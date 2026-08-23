@@ -7,7 +7,7 @@ mod pi_common;
 
 fn run_one<C: Communicator>(world: &C, n: i64) -> i64 {
     let rank = world.rank();
-    let input = (rank == 0).then(|| (1..=n).collect::<Vec<u64>>());
+    let input = (rank == 0).then(|| (1..=n).map(|a| a as u64).collect::<Vec<u64>>());
     let result = pmap(
         world,
         &Domain::sequential(),
