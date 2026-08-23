@@ -16,8 +16,7 @@ fn compute_pi_raw<C: Communicator>(world: &C, rank: i32, size: i32, n: i64) -> f
 }
 
 fn main() {
-    let universe =
-        mpi_api::initialize().expect("MPI must not already be initialized or finalized");
+    let universe = mpi_api::initialize().expect("MPI must not already be initialized or finalized");
     let world = universe.world();
     let rank = world.rank();
     let size = world.size();
@@ -33,7 +32,9 @@ fn main() {
         pi_common::print_info("Warm up", "");
         pi_common::print_info("N", n_warm);
     }
-    let _ = pi_common::timed(rank, "warmup", || compute_pi_raw(&world, rank, size, n_warm));
+    let _ = pi_common::timed(rank, "warmup", || {
+        compute_pi_raw(&world, rank, size, n_warm)
+    });
 
     // Benchmarks
     for n in [100_i64, 1000, 10_000, 50_000, 100_000] {

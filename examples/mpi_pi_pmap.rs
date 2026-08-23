@@ -21,8 +21,7 @@ fn run_one<C: Communicator>(world: &C, n: i64) -> i64 {
 }
 
 fn main() {
-    let universe =
-        mpi_api::initialize().expect("MPI must not already be initialized or finalized");
+    let universe = mpi_api::initialize().expect("MPI must not already be initialized or finalized");
     let world = universe.world();
     let rank = world.rank();
 
