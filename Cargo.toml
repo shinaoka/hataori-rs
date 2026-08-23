@@ -39,5 +39,13 @@ name = "mpi_placement_smoke"
 required-features = ["mpi"]
 
 [[example]]
+name = "mpi_pi_raw"
+required-features = ["mpi"]
+
+[[example]]
+name = "mpi_pi_pmap"
+required-features = ["mpi"]
+
+[[example]]
 name = "rsmpi_rt_placement_smoke"
 required-features = ["rsmpi-rt"]
