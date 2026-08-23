@@ -37,19 +37,19 @@ fn main() {
         pi_common::print_info("Warm up", "");
         pi_common::print_info("N", n_warm);
     }
-    let total_warm = run_one(&world, n_warm);
-    if rank == 0 {
-        let _ = pi_common::timed("warmup", || pi_common::estimate_pi(total_warm, n_warm));
-    }
+    let _ = pi_common::timed(rank, "warmup", || {
+        let total = run_one(&world, n_warm);
+        pi_common::estimate_pi(total, n_warm)
+    });
 
     // Benchmarks
     for n in [100_i64, 1000, 10_000, 50_000, 100_000] {
         if rank == 0 {
             pi_common::print_info("N", n);
         }
-        let total = run_one(&world, n);
-        if rank == 0 {
-            let _ = pi_common::timed("benchmark", || pi_common::estimate_pi(total, n));
-        }
+        let _ = pi_common::timed(rank, "benchmark", || {
+            let total = run_one(&world, n);
+            pi_common::estimate_pi(total, n)
+        });
     }
 }

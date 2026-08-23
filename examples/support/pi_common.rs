@@ -49,11 +49,13 @@ pub fn print_info<N: std::fmt::Display>(label: &str, value: N) {
     println!("[ Info: {label} ] {value}");
 }
 
-/// Time a computation and print the elapsed time and result.
-pub fn timed<F: FnOnce() -> f64>(label: &str, f: F) -> f64 {
+/// Time a computation and, on rank 0, print the elapsed time and result.
+pub fn timed<F: FnOnce() -> f64>(rank: i32, label: &str, f: F) -> f64 {
     let start = Instant::now();
     let output = f();
     let elapsed = start.elapsed();
-    println!("[ Info: {label} ] elapsed = {elapsed:?}, output = {output}");
+    if rank == 0 {
+        println!("[ Info: {label} ] elapsed = {elapsed:?}, output = {output}");
+    }
     output
 }
