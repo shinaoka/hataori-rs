@@ -2,9 +2,8 @@
 
 ## Status
 
-Proposed Phase A-1 design. Implementation must not start until an independent
-pre-implementation review records a **Correct-to-merge** verdict in
-`docs/review-log.md`.
+Implemented Phase A-1 design. The completed pre- and post-implementation review
+gates are recorded in `docs/review-log.md`.
 
 ## Purpose
 
@@ -14,9 +13,9 @@ experiments one stable way to execute legacy `map`, `map_in`, `pmap`, and
 placement-helper workloads without checking out or modifying the reference
 commit.
 
-This slice produces no performance claim. The complete case manifest, host
-validity gates, repetitions, statistics, and acceptance thresholds are the
-next Phase A slice and must land before any candidate measurement.
+This runner produces no performance claim. The complete case manifest, host
+validity gates, repetitions, statistics, and acceptance thresholds are frozen
+in `benchmarks/performance/manifest.toml` before any candidate measurement.
 
 ## Location and source pin
 
@@ -79,10 +78,10 @@ Rayon cases additionally accept `--threads N` and
 and `--prefetch true|false`. MPI process count remains launcher-owned rather
 than being duplicated in runner arguments.
 
-Each invocation constructs its domain and input once, executes the requested
-warmups, then reports every measured repetition separately. Setup, MPI
-initialization, and shutdown are outside operation timing. A later manifest
-runner measures bootstrap/shutdown separately at the process level.
+Each invocation constructs its domain once. Because the APIs consume owned
+input, it prepares fresh equivalent input outside the timed region before each
+warmup and repetition. Setup, MPI initialization, and shutdown are outside
+operation timing; the frozen manifest requires them to be recorded separately.
 
 ## Workload and correctness
 
@@ -104,7 +103,7 @@ Each successful measured repetition prints one machine-readable TSV record to
 stdout with a literal `HATAORI_BENCH` prefix and fixed keys:
 
 ```text
-HATAORI_BENCH	case=...	repetition=...	elapsed_ns=...	checksum=...	items=...	payload_bytes=...	work=...	ranks=...	threads=...	mode=...	batch_size=...	prefetch=...	baseline_commit=34cb1b...
+HATAORI_BENCH	case=...	repetition=...	elapsed_ns=...	checksum=...	items=...	payload_bytes=...	work=...	ranks=...	threads=...	mode=...	batch_size=...	prefetch=...	warmups=...	baseline_commit=34cb1b...
 ```
 
 Values are decimal integers or closed ASCII tokens, so escaping is unnecessary.
@@ -139,13 +138,26 @@ smoke lane; hosted CI installs MPI and runs the complete script.
 This slice does not:
 
 - benchmark the current or future runtime;
-- define the final case matrix or hardware profile;
 - run baseline-versus-baseline calibration;
 - implement paired interleaving or statistical analysis;
 - add TCP, segmented parcels, remote objects, migration, or observability;
 - copy the existing π or Mandelbrot examples into another benchmark suite;
 - modify P0/P1 source or its measured fast paths.
 
-The following Phase A slice adds the immutable experiment manifest and
-orchestrator around this runner. Runtime/protocol implementation remains
-blocked until both slices are accepted.
+## Frozen experiment manifest
+
+`benchmarks/performance/manifest.toml` is the machine-readable source of truth
+for the complete case families, host validity observations, paired statistics,
+noise-derived tolerance capped at 2%, acceptance thresholds, instrumentation,
+and predeclared TCP targets. `scripts/check-performance-manifest.py` fails
+closed if required coverage or a hard threshold is removed. Candidate results
+must not modify this manifest; every report records its SHA-256.
+
+The manifest deliberately contains future-runtime cases which the legacy runner
+cannot execute. Their presence freezes their acceptance contract; it does not
+claim those facilities are implemented. A later experiment orchestrator must
+refuse candidate execution unless it can execute every case selected for the
+candidate's declared comparison lane.
+
+Protocol/runtime implementation may start only from a commit containing both
+this checked manifest and the immutable runner.

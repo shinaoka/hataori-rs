@@ -769,8 +769,11 @@ fast path may use backend capabilities without changing the facade contract.
 The performance reference for “current Hataori” is commit
 `34cb1b1371c8b2f8ef750e2d49d10f9ef8f0782e` (2026-08-23). Before runtime work
 changes or removes the P0/P1 path, Phase A freezes a buildable benchmark runner
-for that exact commit. The baseline is immutable after candidate measurements
-begin. Existing `mpi_pi_pmap`, `mpi_mandelbrot_pmap`, and
+for that exact commit. `benchmarks/performance/manifest.toml` freezes the case
+families, host gates, statistics, thresholds, and TCP targets, with
+`scripts/check-performance-manifest.py` enforcing its hard requirements. The
+baseline and manifest are immutable after candidate measurements begin.
+Existing `mpi_pi_pmap`, `mpi_mandelbrot_pmap`, and
 `mpi_mandelbrot_hybrid` workloads seed the suite but do not by themselves
 constitute the full gate.
 

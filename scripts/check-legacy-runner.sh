@@ -10,6 +10,7 @@ trap 'rm -rf -- "$tmp_dir"' EXIT
 
 [[ $(grep -c "rev = \"$baseline\"" "$manifest") == 1 ]]
 [[ $(grep -c "#${baseline}\"" "$lockfile") == 1 ]]
+"$root_dir/scripts/check-performance-manifest.py"
 
 export BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-"-I$(gcc -print-file-name=include)"}
 
