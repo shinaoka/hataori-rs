@@ -1,0 +1,55 @@
+# Hataori
+
+> Hataori (機織り, "weaving on a loom") is a Rust engine for simple serial, Rayon, MPI, and hybrid MPI + Rayon data-parallel execution. It is inspired by Distributed.jl's dynamically scheduled `pmap` while keeping Rust's scoped execution and MPI's SPMD model: every entry point is a synchronous function call, results always come back in input order, and the first callback error is reported with its input index.
+
+## Conventions you must know before writing code
+
+- **No default features.** Enable exactly the backends you use: `rayon` (rank-local thread pool), `mpi` (link-time rsmpi), or `rsmpi-rt` (MPIABI runtime loading). `mpi` and `rsmpi-rt` expose the same API and are mutually exclusive; enabling both is a compile error.
+- **One contract for every model.** Input is a `Vec<T>`, output is a `Vec<U>` in the same order; every call is synchronous; the callback returns `Result<U, E>` with `E: Display`, and the first error is reported with its zero-based index (`MapError::index()`) or, for `pmap`, a `PmapErrorKind` plus a converged error `key()`.
+- **Entry point follows the feature set.** `hataori::map` (serial, no bounds beyond `Display`), `hataori::map_in` on a Rayon `Domain` (`rayon`), and `hataori::pmap` (`mpi`/`rsmpi-rt`; hybrid when `rayon` is also enabled).
+- **`pmap` is a collective.** Every rank calls it in the same order with the same communicator and `PmapOptions`; only `options.root` supplies `Some(items)` and receives `Some(results)`, every other rank passes `None` and receives `None`. Items and results cross rank boundaries, so `T` and `U` must be serde-serializable.
+- **`rayon` changes what `pmap` means.** MPI-only `pmap` requires `LocalMode::Sequential` and rejects `prefetch: true`; with `rayon` enabled `pmap` is the hybrid entry point, rejects `Domain::sequential()`, and needs a pooled `Domain`.
+- **`LocalMode` picks in-pool concurrency.** `Sequential` (one callback at a time), `Outer` (callbacks in parallel; evaluate everything, report the lowest failing index), `Inner` (one callback at a time, nested Rayon inside the callback runs in the same pool).
+- **P0/P1 limits.** Exactly one execution domain per rank (`DomainId::ZERO`); the batch size is fixed per call; prefetch is opt-in, default off, and bounded to one batch per remote hybrid domain.
+- **`rsmpi-rt` needs `MPI_RT_LIB`.** Set it to the absolute path of the MPIwrapper library before launch; there is no link-time MPI dependency in that build.
+
+## Getting started
+
+- [README](https://github.com/shinaoka/hataori-rs/blob/main/README.md): The repository router — features, MPI prerequisites, smoke examples, the docs developer guide, and links to every design document.
+- [Documentation home](https://shinaoka.github.io/hataori-rs/): Execution-model table, the "where to start" workflow map, and a thirty-second serial example.
+- [Getting Started](https://shinaoka.github.io/hataori-rs/getting-started/): Cargo dependency lines per feature set, per-feature prerequisites, choosing an execution model, and running the tutorial code.
+- [Parallel Execution Models](https://shinaoka.github.io/hataori-rs/guides/parallel-models.html): The four models (serial `map`, Rayon `map_in`, MPI `pmap`, hybrid `pmap`), the `LocalMode` semantics, a model-selection table, and the current P0/P1 limits.
+- [Choosing Features and Backends](https://shinaoka.github.io/hataori-rs/guides/features-and-backends.html): Feature matrix, link-time `mpi` versus runtime-loaded `rsmpi-rt`, and the optional `tenferro` feature.
+
+## Tutorials
+
+- [Tutorials index](https://shinaoka.github.io/hataori-rs/tutorials/): One Mandelbrot workload rendered by every execution model; each page quotes a runnable example under `examples/` that CI compiles and runs.
+- [0. The workload](https://shinaoka.github.io/hataori-rs/tutorials/workload.html): The shared `mandelbrot_common.rs` parameters and per-column kernel every tutorial reuses.
+- [1. Serial map](https://shinaoka.github.io/hataori-rs/tutorials/serial-map.html): `hataori::map` as the semantic baseline: borrowed closures, no `Send`/`'static`/serde requirements.
+- [2. Rayon map_in](https://shinaoka.github.io/hataori-rs/tutorials/rayon-map-in.html): Building a `Domain`, verifiable CPU placement, and the three `LocalMode`s on one machine.
+- [3. MPI pmap](https://shinaoka.github.io/hataori-rs/tutorials/mpi-pmap.html): The collective call shape, `PmapOptions`, root-only input/output, and dynamic batch scheduling across ranks.
+- [4. MPI placement collectives](https://shinaoka.github.io/hataori-rs/tutorials/mpi-placement.html): `broadcast`, `scatter`, and `gather` for owned serde values alongside `pmap`.
+- [5. Hybrid MPI + Rayon pmap](https://shinaoka.github.io/hataori-rs/tutorials/hybrid-pmap.html): A Rayon pool on every rank, `LocalMode` inside batches, and the opt-in bounded prefetch.
+- [6. Runtime-loaded MPI (rsmpi-rt)](https://shinaoka.github.io/hataori-rs/tutorials/rsmpi-rt.html): Tutorials 3–5 without linking MPI: building MPIwrapper, setting `MPI_RT_LIB`, and sharing the runtime with MPI.jl or mpi4py.
+
+## API reference
+
+- [API Reference](https://shinaoka.github.io/hataori-rs/api/): Landing page for the rustdoc, built with `--features mpi,rayon` so feature-gated items are visible and labelled.
+- [`hataori` rustdoc](https://shinaoka.github.io/hataori-rs/api/hataori/index.html): Function-level documentation for `map`, `map_in`, `pmap`, `Domain`, `LocalMode`, `PmapOptions`, the placement collectives, and the error types.
+
+## Design and status
+
+- [P0 design](https://shinaoka.github.io/hataori-rs/design.html): The implemented synchronous core: scheduler state machine, wire codec, collective preflight, domain admission, and the acceptance contract.
+- [P1 bounded prefetch](https://shinaoka.github.io/hataori-rs/design/bounded-prefetch.html): The implemented opt-in prefetch of one batch per remote hybrid domain and its invariants.
+- [tenferro adapter](https://shinaoka.github.io/hataori-rs/design/tenferro-adapter.html): The non-publishable `hataori-tenferro` adapter binding a whole-domain `Inner` callback to tenferro's caller-managed Faer backend.
+- [Distributed runtime architecture](https://shinaoka.github.io/hataori-rs/design/distributed-runtime.html): WARNING — accepted long-term direction only; implementation has not started and the current public API is P0/P1.
+- [Object placement and locality-aware task API](https://shinaoka.github.io/hataori-rs/design/object-placement-api.html): WARNING — accepted component of the future runtime; not implemented.
+- [Implementation readiness](https://shinaoka.github.io/hataori-rs/implementation-readiness.html): Scope split, resolved review findings, upstream evidence, and the validation matrix behind the P0 core.
+- [Review gate log](https://shinaoka.github.io/hataori-rs/review-log.html): Pre-implementation and per-task review verdicts.
+- [Core acceptance ledger](https://shinaoka.github.io/hataori-rs/core-acceptance-ledger.html): Maps the P0/P1 core acceptance contract to checked evidence and the `scripts/check-core.sh` entry point.
+- [tenferro acceptance ledger](https://shinaoka.github.io/hataori-rs/tenferro-acceptance-ledger.html): Phase 20a adapter evidence behind `scripts/check-tenferro.sh`.
+
+## Agent rules
+
+- [AGENTS.md](https://github.com/shinaoka/hataori-rs/blob/main/AGENTS.md): Which shared tensor4all agent rules to load, the current implementation status, and where durable architecture changes must be recorded.
+- [REPOSITORY_RULES.md](https://github.com/shinaoka/hataori-rs/blob/main/REPOSITORY_RULES.md): Hataori-specific durable constraints on layering, transports, protocol boundedness, object identity, and validation.

@@ -8,6 +8,7 @@ on:
       - "docs/**"
       - "scripts/build_docs_site.sh"
       - "scripts/check-doc-snippets.py"
+      - "scripts/check-llms-index.py"
       - "scripts/check-tutorial-examples.sh"
       - ".github/workflows/docs.yml"
       - "src/**"
