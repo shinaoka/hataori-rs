@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "docs/**"
+      - "README.md"
       - "scripts/build_docs_site.sh"
       - "scripts/check-doc-snippets.py"
       - "scripts/check-llms-index.py"

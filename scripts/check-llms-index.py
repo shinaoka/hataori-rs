@@ -6,7 +6,9 @@ Checks:
      non-empty description, a unique URL, and a URL that resolves to an
      existing source file (a docs page, the rustdoc landing directory, or a
      file in this repository on GitHub).
-  2. docs/_quarto.yml publishes llms.txt as a site resource.
+  2. docs/_quarto.yml publishes llms.txt as a site resource, and every page
+     its `render:` globs publish is described by an entry (rustdoc is covered
+     by the `api/hataori/` entry), so a new page cannot be added silently.
   3. README.md links docs/llms.txt and llms.txt links back to the README, so
      the README stays the single router.
   4. With --docs-site-root, the rendered site carries llms.txt at its root.
@@ -50,6 +52,28 @@ def source_path(root: pathlib.Path, url: str):
     return None
 
 
+def rendered_pages(root: pathlib.Path, quarto_text: str):
+    """Return the docs/-relative Markdown pages that `render:` publishes."""
+    match = re.search(r"(?m)^  render:\n((?:    - .*\n)+)", quarto_text)
+    if match is None:
+        return None
+    docs = root / "docs"
+    include, exclude = set(), set()
+    for line in match.group(1).splitlines():
+        pattern = line.strip()[2:].strip().strip("\"'")
+        negate = pattern.startswith("!")
+        pattern = pattern.lstrip("!")
+        if pattern.endswith("**"):
+            pattern += "/*.md"
+        bucket = exclude if negate else include
+        bucket.update(
+            path.relative_to(docs).as_posix()
+            for path in docs.glob(pattern)
+            if path.is_file() and path.suffix == ".md"
+        )
+    return include - exclude
+
+
 def check_index(root: pathlib.Path, docs_site_root):
     errors = []
     index = root / "docs" / "llms.txt"
@@ -58,15 +82,15 @@ def check_index(root: pathlib.Path, docs_site_root):
     text = index.read_text(encoding="utf-8")
 
     quarto = root / "docs" / "_quarto.yml"
-    if not quarto.is_file() or not re.search(
-        r"(?m)^\s*-\s*llms\.txt\s*$", quarto.read_text(encoding="utf-8")
-    ):
+    quarto_text = quarto.read_text(encoding="utf-8") if quarto.is_file() else ""
+    if not re.search(r"(?m)^\s*-\s*llms\.txt\s*$", quarto_text):
         errors.append("docs/_quarto.yml must list llms.txt under project resources")
 
     entries = list(LINK_RE.finditer(text))
     if not entries:
         errors.append("docs/llms.txt has no described Markdown links")
     seen = set()
+    indexed_pages = set()
     for match in entries:
         label, url, description = match.groups()
         if url in seen:
@@ -81,6 +105,15 @@ def check_index(root: pathlib.Path, docs_site_root):
             errors.append(
                 f"docs/llms.txt target does not exist: {url} -> {target.relative_to(root)}"
             )
+        elif (root / "docs") in target.parents:
+            indexed_pages.add(target.relative_to(root / "docs").as_posix())
+
+    pages = rendered_pages(root, quarto_text)
+    if pages is None:
+        errors.append("docs/_quarto.yml has no project render list to check llms.txt against")
+    else:
+        for page in sorted(pages - indexed_pages):
+            errors.append(f"docs/llms.txt does not describe the published page: docs/{page}")
 
     readme = root / "README.md"
     if not readme.is_file():

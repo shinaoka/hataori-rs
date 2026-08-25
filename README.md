@@ -122,24 +122,25 @@ python3 scripts/check-doc-snippets.py
 
 CI runs the same script with `--check` and fails on stale snippets or on any
 ` ```rust ` fence in the guides and tutorials that is not backed by a
-snippet marker.
+snippet marker. Run the examples themselves (small image, every feature
+lane, MPI ones via `mpiexec -n 2`; needs Rust >= 1.96 for `tenferro`) with:
+
+```bash
+scripts/check-tutorial-examples.sh                                   # link-time MPI lanes
+scripts/check-tutorial-examples.sh /abs/path/to/libmpiwrapper.so     # plus rsmpi-rt lanes
+```
 
 ### Keep `docs/llms.txt` in sync
 
 `docs/llms.txt` is the machine-oriented index of the site. When a page is
 added, renamed, or removed under `docs/`, update its entry there;
 `scripts/check-llms-index.py` (run by `scripts/build_docs_site.sh` and CI)
-fails when an entry points at a page that no longer exists, when a URL is
-repeated, or when the README stops linking the index:
+fails when an entry points at a page that no longer exists, when a page
+rendered by `docs/_quarto.yml` has no entry, when a URL is repeated, or when
+the README stops linking the index:
 
 ```bash
 python3 scripts/check-llms-index.py
-``` Run the examples themselves (small image, every feature
-lane, MPI ones via `mpiexec -n 2`; needs Rust >= 1.96 for `tenferro`) with:
-
-```bash
-scripts/check-tutorial-examples.sh                                   # link-time MPI lanes
-scripts/check-tutorial-examples.sh /abs/path/to/libmpiwrapper.so     # plus rsmpi-rt lanes
 ```
 
 ### Publishing
