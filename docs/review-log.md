@@ -244,6 +244,24 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 
+### Phase A-1 — immutable legacy performance runner
+
+- Design slice: `docs/design/legacy-performance-runner.md`
+- Reviewer selected by user: `reviewer-flash` (DeepSeek family, read-only, `high`; `reviewer-flash-opencode-go` was unavailable)
+- Initial attempt: timed out before producing a verdict; no gate credit was assigned.
+- Exact-state retry verdict: **Correct-to-merge**
+- Blocking findings: none
+- Verified: immutable full-SHA Hataori pin plus lockfile guard, operation-only timing, deterministic value-dependent workload/checksum, MPI/Rayon feature compatibility, raw-record integrity, bounded smoke coverage, and an explicit block on candidate measurements until the next manifest/statistics slice lands.
+- Non-blocking implementation notes: pin the runner's direct MPI dependency exactly to `=0.8.1`, include one world-size-two hybrid smoke case, and include the warmup count in each raw record.
+- Gate status: **COMPLETE — Phase A-1 implementation may start**
+- Implementer: `luna-implementer` (GPT family, write-capable) began the runner slice; after two bounded timeouts, the parent completed integration under the same approved design.
+- Implementation verification: all four feature sets passed tests and clippy with `-D warnings`; all four passed Rust 1.85 checks; `scripts/check-legacy-runner.sh` passed serial, all Rayon modes, MPI world sizes one/two, all placement helpers, and two-rank prefetched hybrid `pmap` with process-group watchdogs.
+- Post-implementation reviewer: `reviewer-flash` (DeepSeek family, read-only, `high`)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking notes, with no extra review round requested: align the design's sample record/input wording, strengthen later orchestrator field validation, avoid misleading mpi-only thread metadata, and make hosted MPI absence fail closed when the manifest/orchestrator slice adds an explicit CI mode.
+- Gate status: **COMPLETE — Phase A-1 is ready to merge**
+
 ### P1 — bounded prefetch
 
 - Design slice: `docs/design/bounded-prefetch.md` plus the P1 amendments in `docs/design.md` and `docs/implementation-readiness.md`
