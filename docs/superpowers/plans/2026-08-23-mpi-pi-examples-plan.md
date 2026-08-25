@@ -1,5 +1,12 @@
 # MPI π Examples Implementation Plan
 
+> **Status (2026-08-25):** Implemented in commits `f35c4fc`, `f398410`, `e53ec1c`,
+> `e0dccb6`, with follow-ups `f60fee5`, `5003360`, `fb1965e`, `808ed2c`. The current
+> code differs from this document in: the helpers use `i64`, the timer is
+> `timed(rank, label, f)`, `mpi_pi_pmap` uses `batch_size = 10`, and all ranks time
+> the full computation while only rank 0 prints. There is no automated test for
+> these examples.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add two MPI example binaries (`mpi_pi_raw.rs` and `mpi_pi_pmap.rs`) and a shared helper module (`examples/support/pi_common.rs`) that mirror the provided Julia π benchmark.

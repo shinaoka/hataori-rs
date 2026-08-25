@@ -16,6 +16,10 @@ root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root_dir"
 export BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-"-I$(gcc -print-file-name=include)"}
 
+# The `tenferro` feature (Mandelbrot examples only) needs Rust >= 1.96 and is
+# therefore outside the 1.85 matrix below; it is built and run separately.
+scripts/check-tutorial-examples.sh "$mpi_rt_lib"
+
 cargo fmt --check
 for features in '' rayon mpi mpi,rayon rsmpi-rt rsmpi-rt,rayon; do
     if [[ -z $features ]]; then

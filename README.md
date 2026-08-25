@@ -9,14 +9,14 @@ serial, Rayon, MPI, hybrid, and runtime-loaded-MPI modes, and the API
 reference — is published from `docs/` at
 <https://shinaoka.github.io/hataori-rs/>. Build it locally with
 `scripts/build_docs_site.sh` (requires [Quarto](https://quarto.org)); the
-tutorial code lives in `docs/tutorial-code` and runs with
-`docs/tutorial-code/scripts/check.sh`.
+tutorials quote the Mandelbrot examples under `examples/`, which run with
+`scripts/check-tutorial-examples.sh`.
 
 ## Name
 
 **Hataori** comes from the Japanese word **機織り** (*hataori*), meaning weaving on a loom. The name reflects the engine's job: weave independent strands of work across MPI ranks and Rayon threads into one ordered result.
 
-## Planned features
+## Features
 
 Hataori has no default dependencies. Optional execution backends are selected explicitly:
 
@@ -30,7 +30,8 @@ Hataori has no default dependencies. Optional execution backends are selected ex
 
 The non-publishable `hataori-tenferro` workspace adapter binds an admitted
 whole-domain `Inner` callback to tenferro's caller-managed Faer backend without
-adding tenferro to ordinary Hataori builds. See its
+adding tenferro to ordinary Hataori builds; it declares `rust-version = "1.96"`
+following the pinned tenferro-rs. See its
 [design and usage contract](docs/design/tenferro-adapter.md).
 
 ### MPI backend prerequisites
@@ -45,7 +46,7 @@ Then verify that `mpicc` and `mpiexec` are on your `PATH` before building with `
 
 ## Running the examples
 
-Build and run the MPI smoke tests with `mpiexec`. The examples are silent on success because they verify behavior through assertions.
+Build and run the MPI smoke tests with `mpiexec`. The smoke examples exit silently on success (except `rsmpi_rt_pmap_smoke`, which prints the loaded `MPI_RT_LIB`) because they verify behaviour through assertions.
 
 ### Upstream MPI backend (`mpi`)
 
@@ -67,8 +68,8 @@ MPI_RT_LIB=/absolute/path/to/libmpiwrapper.so mpiexec -n 4 target/debug/examples
 ## Developer guide: working on the documentation
 
 The site under `docs/` is a [Quarto](https://quarto.org) website. The
-tutorial pages quote Rust code verbatim from the `docs/tutorial-code`
-workspace member, and CI rejects pages that drift from that code.
+tutorial pages quote Rust code verbatim from the Mandelbrot examples under
+`examples/`, and CI rejects pages that drift from that code.
 
 ### Preview locally
 
@@ -106,7 +107,8 @@ quarto preview docs          # live reload from here on
 
 The Rust blocks in `docs/tutorials/` and `docs/index.md` are copies of the
 regions between `// snippet-start:NAME` and `// snippet-end:NAME` in
-`docs/tutorial-code/src/`. After changing a `.rs` file, re-sync the Markdown:
+`examples/*.rs` and `examples/support/mandelbrot_common.rs`. After changing a
+`.rs` file, re-sync the Markdown:
 
 ```bash
 python3 scripts/check-doc-snippets.py
@@ -114,16 +116,17 @@ python3 scripts/check-doc-snippets.py
 
 CI runs the same script with `--check` and fails on stale snippets or on any
 ` ```rust ` fence in the guides and tutorials that is not backed by a
-snippet marker. Run the tutorial binaries themselves with:
+snippet marker. Run the examples themselves (small image, every feature
+lane, MPI ones via `mpiexec -n 2`; needs Rust >= 1.96 for `tenferro`) with:
 
 ```bash
-cargo test -p hataori-tutorial-code --features rayon   # single-process tutorials
-docs/tutorial-code/scripts/check.sh                    # all lanes; MPI ones via mpiexec -n 2
+scripts/check-tutorial-examples.sh                                   # link-time MPI lanes
+scripts/check-tutorial-examples.sh /abs/path/to/libmpiwrapper.so     # plus rsmpi-rt lanes
 ```
 
 ### Publishing
 
-`.github/workflows/docs.yml` runs the tutorial lanes, builds the site, and
+`.github/workflows/docs.yml` runs the tutorial examples, builds the site, and
 deploys it to GitHub Pages on every push to `main`; pull requests only build.
 Deployment requires the repository's Pages source to be set to "GitHub
 Actions" once by an administrator.

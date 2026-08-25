@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the Hataori documentation site into target/docs-site.
 #
-#   1. verify that every published Rust snippet matches docs/tutorial-code
+#   1. verify that every published Rust snippet matches examples/
 #   2. build rustdoc for the core crate with every backend documented
 #   3. render the Quarto site and copy rustdoc under <site>/api/
 #

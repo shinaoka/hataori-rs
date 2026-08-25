@@ -10,7 +10,7 @@ scripts/check-tenferro.sh
 |---|---|
 | Core default and Rayon builds contain no tenferro/tensor4all | root `cargo tree` assertions |
 | Adapter pins merged tenferro PR #1717 and contains no tensor4all | adapter lock/tree assertions |
-| Core retains Rust 1.85; adapter follows tenferro Rust 1.96 | separate toolchain checks |
+| Core retains Rust 1.85; adapter declares `rust-version = "1.96"` matching the pinned tenferro-rs workspace | `check-tenferro.sh` runs `cargo +1.85.0 check` for core only; the adapter is checked on current stable, and no separate 1.96 toolchain check exists |
 | Exact Hataori Rayon pool and full budget are retained | adapter diagnostics and pool start counter |
 | Caller-managed Faer, no placement, caller-owned shutdown | integration diagnostics |
 | Known tensor operation executes on the supplied named team | known-value add plus worker-name census |

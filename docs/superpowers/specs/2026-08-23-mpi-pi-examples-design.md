@@ -1,5 +1,12 @@
 # MPI π Examples Design
 
+> **Status (2026-08-25):** Implemented in commits `f35c4fc`, `f398410`, `e53ec1c`,
+> `e0dccb6`, with follow-ups `f60fee5`, `5003360`, `fb1965e`, `808ed2c`. The current
+> code differs from this document in: the helpers use `i64`, the timer is
+> `timed(rank, label, f)`, `mpi_pi_pmap` uses `batch_size = 10`, and all ranks time
+> the full computation while only rank 0 prints. There is no automated test for
+> these examples.
+
 ## Goal
 
 Add Rust examples under `./examples` that are equivalent to the provided Julia MPI

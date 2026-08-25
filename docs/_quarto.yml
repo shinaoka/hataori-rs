@@ -14,7 +14,7 @@ project:
     - core-acceptance-ledger.md
     - tenferro-acceptance-ledger.md
     - "!superpowers/**"
-    - "!tutorial-code/**"
+    - "!worklogs/**"
 
 format:
   html:
@@ -55,6 +55,8 @@ website:
       - section: "Tutorials"
         contents:
           - tutorials/index.md
+          - text: "0. The workload"
+            href: tutorials/workload.md
           - text: "1. Serial map"
             href: tutorials/serial-map.md
           - text: "2. Rayon map_in"

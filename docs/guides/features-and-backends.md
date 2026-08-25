@@ -25,13 +25,18 @@ code is identical apart from the crate alias it imports.
 | Build requirements | MPI headers, `mpicc`, libclang (bindgen) | a Rust toolchain only |
 | Typical use | HPC clusters where the module system provides MPI | wheels/binaries shared with MPI.jl or mpi4py, sandboxed builds |
 
-`MPI_RT_LIB` must be an absolute path to an MPIABI-compatible library, such as
+`MPI_RT_LIB` should be an absolute path to an MPIABI-compatible library (the
+loader passes it to `dlopen` verbatim; the project scripts require an absolute
+path), such as
 one built from [MPIwrapper](https://github.com/eschnett/MPIwrapper). See the
 [rsmpi-rt tutorial](../tutorials/rsmpi-rt.md).
 
 ## The `tenferro` feature
 
 `tenferro` pulls in `tenferro-tensor` for the Mandelbrot examples under
-`examples/`. The separate `hataori-tenferro` workspace adapter binds a
+`examples/`; because the pinned tenferro-rs workspace sets
+`rust-version = "1.96"`, this feature needs Rust >= 1.96 (the rest of the
+core matrix keeps MSRV 1.85). The separate `hataori-tenferro` workspace
+adapter, which likewise declares `rust-version = "1.96"`, binds a
 whole-domain `LocalMode::Inner` callback to tenferro's caller-managed Faer
 backend; see the [adapter design](../design/tenferro-adapter.md).

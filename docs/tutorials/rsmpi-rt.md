@@ -1,30 +1,32 @@
 # 6. Runtime-loaded MPI (rsmpi-rt)
 
 **Model:** the same as tutorials 3–5. **Features:** `rsmpi-rt` instead of
-`mpi`.
+`mpi`. **Examples:** `rsmpi_rt_mandelbrot_pmap`,
+`rsmpi_rt_mandelbrot_placement`, `rsmpi_rt_mandelbrot_hybrid`.
 
 The `rsmpi-rt` feature swaps the upstream rsmpi crate for
 [tensor4all/rsmpi-rt](https://github.com/tensor4all/rsmpi-rt), which loads
 an MPIABI-compatible shared library at process start instead of linking MPI
-at build time. Nothing in the Hataori API changes; the tutorial binaries only
-differ in the crate alias they import, which the tutorial code selects with a
-`cfg`:
+at build time. Nothing in the Hataori API changes; the Mandelbrot examples
+only differ in the crate alias they import, which the shared support module
+selects with a `cfg`:
 
-<!-- snippet-source: docs/tutorial-code/src/support/mpi_backend.rs -->
+<!-- snippet-source: examples/support/mandelbrot_common.rs#backend -->
 ```rust
-//! Backend alias shared by the MPI tutorial binaries.
-//!
-//! The `mpi` feature links the upstream rsmpi crate; the `rsmpi-rt` feature
-//! loads an MPIABI-compatible runtime at process start. Both expose the same
-//! rsmpi API, so tutorial code only needs one alias.
-
+// The MPI crate alias shared by the MPI examples.
+//
+// The `mpi` feature links the upstream rsmpi crate at build time; the
+// `rsmpi-rt` feature loads an MPIABI-compatible runtime at process start.
+// Both expose the same rsmpi API, so the examples only need one alias and
+// the same source builds against either backend.
+#[cfg(all(feature = "rsmpi-rt", not(feature = "mpi")))]
+#[allow(unused_imports)]
+pub use mpi_runtime as mpi_api;
 #[cfg(all(feature = "mpi", not(feature = "rsmpi-rt")))]
+#[allow(unused_imports)]
 pub use mpi_upstream as mpi_api;
 
-#[cfg(all(feature = "rsmpi-rt", not(feature = "mpi")))]
-pub use mpi_runtime as mpi_api;
-
-/// Prints the runtime library used by the `rsmpi-rt` backend, if any.
+/// Names the MPI backend the example was compiled with.
 pub fn describe_backend() -> &'static str {
     if cfg!(feature = "rsmpi-rt") {
         "rsmpi-rt (runtime-loaded MPI)"
@@ -34,6 +36,11 @@ pub fn describe_backend() -> &'static str {
 }
 ```
 <!-- end-snippet-source -->
+
+Cargo's `required-features` cannot express "`mpi` *or* `rsmpi-rt`", so each
+MPI example is registered twice: `mpi_mandelbrot_pmap` requires `mpi`, and
+`rsmpi_rt_mandelbrot_pmap` — a four-line wrapper that includes the same
+source file with `#[path]` — requires `rsmpi-rt`.
 
 ## Why use it
 
@@ -59,21 +66,25 @@ cmake --install MPIwrapper/build
 
 ## Build and run the tutorials
 
-`MPI_RT_LIB` must be an absolute path and must be set before MPI is
-initialized:
+`MPI_RT_LIB` is passed to the dynamic loader verbatim and must be set before
+MPI is initialized; use an absolute path so that it does not depend on the
+working directory `mpiexec` starts each rank in:
 
 ```bash
-cargo build -p hataori-tutorial-code --features rsmpi-rt --bin mpi_pmap
+cargo build --release --no-default-features --features rsmpi-rt,tenferro \
+  --example rsmpi_rt_mandelbrot_pmap
 MPI_RT_LIB=/abs/path/mpiwrapper-install/lib/libmpiwrapper.so \
-  mpiexec -n 4 target/debug/mpi_pmap
+  mpiexec -n 4 target/release/examples/rsmpi_rt_mandelbrot_pmap --width 1024 --height 1024
 
-cargo build -p hataori-tutorial-code --features rsmpi-rt,rayon --bin hybrid_pmap
+cargo build --release --no-default-features --features rsmpi-rt,rayon,tenferro \
+  --example rsmpi_rt_mandelbrot_hybrid
 MPI_RT_LIB=/abs/path/mpiwrapper-install/lib/libmpiwrapper.so \
-  mpiexec -n 2 target/debug/hybrid_pmap
+  mpiexec -n 2 target/release/examples/rsmpi_rt_mandelbrot_hybrid --workers 2 --width 1024 --height 1024
 ```
 
+Each example prints `Backend: rsmpi-rt (runtime-loaded MPI)` on the root.
 The whole matrix, including these lanes, runs with:
 
 ```bash
-docs/tutorial-code/scripts/check.sh /abs/path/mpiwrapper-install/lib/libmpiwrapper.so
+scripts/check-tutorial-examples.sh /abs/path/mpiwrapper-install/lib/libmpiwrapper.so
 ```

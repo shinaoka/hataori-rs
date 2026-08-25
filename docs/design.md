@@ -1,6 +1,6 @@
 # Hataori P0 Design
 
-**Status:** Core implementation-ready; pre-implementation review verdict `Correct-to-merge`
+**Status:** Implemented (P0 core); pre-implementation review verdict `Correct-to-merge`. See [`core-acceptance-ledger.md`](core-acceptance-ledger.md) for the delivered matrix.
 
 **Scope:** A generic synchronous collective data-parallel engine for MPI ranks and rank-local Rayon execution domains
 
@@ -39,9 +39,14 @@ The default build is standard-library-only. P0 keeps one crate with optional fea
 | `mpi` | upstream `mpi` (rsmpi), `serde`, and `bincode` |
 | `rsmpi-rt` | [`tensor4all/rsmpi-rt`](https://github.com/tensor4all/rsmpi-rt) as package `mpi`, plus `serde` and `bincode` |
 | Linux managed affinity | `libc` |
+| `tenferro` | `tenferro-tensor` (pinned git revision), used only by the Mandelbrot examples under `examples/`; requires Rust >= 1.96 because the pinned tenferro-rs workspace sets `rust-version = "1.96"`, so it is excluded from the Rust 1.85 feature matrix |
 
 Optional integration stays in separate workspace crates so those dependency
-trees never enter ordinary Hataori builds. Phase 20a provides the tenferro-only
+trees never enter ordinary Hataori builds; the default, `rayon`, and MPI trees
+contain no tenferro or tensor4all crate (enforced by `scripts/check-core.sh`
+and `scripts/check-tenferro.sh`), and the opt-in `tenferro` example feature is
+built and run by `scripts/check-tutorial-examples.sh`, which builds and runs
+the Mandelbrot examples with the `tenferro` feature. Phase 20a provides the tenferro-only
 `hataori-tenferro` foundation pinned to tenferro merge `a21a4c602fc6700b9bc0c3f1b14ebd19b9d7ec45`;
 Phase 20b adds tensor4all contexts and reconstruction after tensor4all-rs#663.
 
@@ -99,7 +104,7 @@ future tensor adapter owns tensor4all explicit contexts and domain-owned
 runtimes/caches, tensor logical wire representation and target-context
 reconstruction, and context-specific errors.
 
-Neither tenferro nor tensor4all may depend on Hataori types. Hataori core must build without either dependency.
+Neither tenferro nor tensor4all may depend on Hataori types. Hataori core must build without either dependency unless the opt-in `tenferro` example feature is requested.
 
 ## 3. Public execution model
 
@@ -107,7 +112,7 @@ The public calls have this argument and return shape; feature-specific implement
 
 ```rust
 pub struct PmapOptions {
-    pub root: Rank,
+    pub root: i32,
     pub batch_size: NonZeroUsize,
     pub local_mode: LocalMode,
     pub prefetch: bool,
@@ -137,7 +142,7 @@ where
 
 Here `Communicator` is the existing trait from the one selected rsmpi crate, not a Hataori transport trait. Core uses only communicator duplication, rank/size, tagged blocking send and exact-source receive, `immediate_probe_with_tag`, signed built-in min reductions, and broadcast. The two mutually exclusive dependencies expose that same rsmpi surface through a private crate alias.
 
-`MapError` records the lowest failing input index and bounded `E::to_string()`. Serial `map` stops at the first callback error. Rayon `Sequential` and `Inner` likewise stop after the failing item. Rayon `Outer` evaluates every input exactly once in the target pool, preserves input order, then deterministically reports the lowest failed input index; it does not short-circuit admission. `MapInError` distinguishes `MissingPool`, `ForeignPool`, `DomainBusy`, and `Callback(MapError)` because only callback failures have an input index. `map_in` checks them in that order: target pool presence, foreign-pool origin, domain admission, then callbacks. `PmapError` is a core enum for preflight, domain, user, wire, and protocol failures and carries the deterministic error key and bounded message where applicable. Tensor/backend integration errors remain in the adapter.
+`MapError` records the lowest failing input index and bounded `E::to_string()`. Serial `map` stops at the first callback error. Rayon `Sequential` and `Inner` likewise stop after the failing item. Rayon `Outer` evaluates every input exactly once in the target pool, preserves input order, then deterministically reports the lowest failed input index; it does not short-circuit admission. `MapInError` distinguishes `MissingPool`, `ForeignPool`, `DomainBusy`, and `Callback(MapError)` because only callback failures have an input index. `map_in` checks them in that order: target pool presence, foreign-pool origin, domain admission, then callbacks. `PmapError` is a core struct exposing `kind()`, `key()`, and `message()`; `PmapErrorKind` distinguishes `Reentrant`, `Preflight`, `User`, `Wire`, and `Protocol` (busy-domain and other admission failures are reported as `Preflight`), and the error carries the deterministic error key and bounded message where applicable. Tensor/backend integration errors remain in the adapter.
 
 - `map` is local serial execution and has no MPI, Rayon, or serialization requirements. `map_in` is its explicit-domain Rayon counterpart.
 - `pmap` is collective: all ranks call it in the same order on the same communicator. Calling it on different communicators or in a different collective order is a caller contract violation that MPI cannot recover from.
@@ -231,7 +236,7 @@ P0 intentionally has no partial inner budget. Rayon cannot cap arbitrary nested 
 
 ### Collective preflight
 
-A small thread-local RAII guard rejects recursive `pmap` on the MPI initialization thread before any MPI call. Subject to that collective precondition, ranks duplicate the caller communicator and enter one preflight before any `READY`/`TASK` traffic. Preflight checks initialization-thread identity, supported MPI thread level, root and option agreement, `0 <= root < world_size`, exactly one root payload on the designated root, no payload elsewhere, domain identity/mode validity, local domain admission, and that the largest possible deterministic error key is strictly less than the reserved `i64::MAX` no-error sentinel. Error-key overflow or sentinel collision is a typed preflight failure. Locally acquired RAII admission guards remain held through the call. Signed built-in reductions converge any validation failure so every rank either enters the scheduler or returns the same typed error; no rank returns alone while peers enter protocol traffic.
+A small thread-local RAII guard rejects recursive `pmap` on the MPI initialization thread before any MPI call. Subject to that collective precondition, ranks duplicate the caller communicator and enter one preflight before any `READY`/`TASK` traffic. Preflight checks initialization-thread identity, supported MPI thread level, root and option agreement, `0 <= root < world_size`, exactly one root payload on the designated root, no payload elsewhere, domain identity/mode validity, and local domain admission. Deterministic error keys are not validated in preflight: `ErrorKey::new` checks the encoded key against the reserved `i64::MAX` no-error sentinel at the point an error is reported (`src/pmap.rs` `error_key`, `src/wire.rs`), and a key that cannot be encoded is an unrecoverable failure that aborts the job with code 72 like other unrecoverable protocol failures. Locally acquired RAII admission guards remain held through the call. Signed built-in reductions converge any validation failure so every rank either enters the scheduler or returns the same typed error; no rank returns alone while peers enter protocol traffic.
 
 Collective call order, communicator identity, and non-reentrant participation on every rank are API preconditions rather than recoverable preflight checks: ranks that do not enter the same collective call cannot communicate enough to diagnose that misuse.
 
@@ -251,7 +256,7 @@ READY(rank, domain=0)
 
 - The root owns a FIFO queue of indexed items. In fixed-input P0, the checked original input index is also the stable `task_key`; no separate task-ID field is transmitted.
 - Batch size is a fixed positive call parameter; the default is 1. Batch IDs start at zero and increase monotonically with checked overflow.
-- Each domain, including the root's, has `running <= 1` and `prefetched = 0`.
+- Each domain, including the root's, has `running <= 1` and `prefetched = 0` (with the default `prefetch = false`; the opt-in P1 prefetch in Section 18 and [`design/bounded-prefetch.md`](design/bounded-prefetch.md) allows `prefetched <= 1` on remote hybrid domains).
 - Every remote `READY` receives exactly one `TASK` or `STOP`.
 - `READY` supplies backpressure; P0 has no credit, acknowledgement, heartbeat, retry, cancellation, cost model, or adaptive batch policy.
 - The root restores order with an O(N) indexed result table.
@@ -268,7 +273,7 @@ While root-local work is running, the initialization thread checks local complet
 
 Without Rayon, the existing MPI-only bounds do not require `Send`, so the root executes its local batch synchronously on the initialization thread. MPI progress may pause for at most that batch's callback; after it returns, the root resumes receiving before assigning more work. This preserves scoped non-`Send` execution and eventual rendezvous progress, but does not promise communication progress during an MPI-only root callback.
 
-`MPI_Iprobe` is permitted only for root event multiplexing. P0 data transfer remains blocking: it has no `Isend`, `Irecv`, request lifecycle, prefetch, or background progress. The coordinator has no dedicated CPU in P0.
+`MPI_Iprobe` is permitted only for root event multiplexing. P0 data transfer remains blocking: it has no `Isend`, `Irecv`, request lifecycle, prefetch, or background progress (the opt-in P1 prefetch in Section 18 overlaps one blocking transfer with computation without adding nonblocking requests). The coordinator has no dedicated CPU in P0.
 
 ### Normative domain state transitions
 
@@ -448,7 +453,7 @@ Backend-specific errors do not enter the core error enum.
 - Empty input, more ranks than inputs, batch size 1, and fixed batch size greater than 1 work.
 - Every successful input executes once and root results preserve input order under reverse completion order.
 - A skewed workload demonstrates meaningful improvement over static contiguous partitioning.
-- Instrumentation proves `running <= 1`, `prefetched = 0`, bounded resident batches, one complete `RESULT` per assigned batch, and exactly one `STOP`/`DRAIN` transition per remote rank.
+- Instrumentation proves `running <= 1`, `prefetched = 0` (with `prefetch = false`; see Section 18 for the prefetch bound), bounded resident batches, one complete `RESULT` per assigned batch, and exactly one `STOP`/`DRAIN` transition per remote rank.
 - With Rayon, remote result payloads of at least 1 MiB make progress while the root domain computes; the watchdog fixture also records that a remote header was serviced before local completion, rather than inferring rendezvous progress from timing alone. Root event polling does not starve local completion.
 - Without Rayon, the root participates synchronously, preserves the MPI-only non-`Send` bounds, and resumes rendezvous progress after each finite local batch.
 - World size one executes every input through the root domain without MPI self-messages or serialization.
@@ -475,7 +480,7 @@ Backend-specific errors do not enter the core error enum.
 - MPI-only use is not forced to satisfy Rayon `Send`/`Sync` bounds.
 - Local non-serialized use is not forced to implement serde.
 - No communicator or backend receives an unsafe thread-safety wrapper.
-- Core's feature matrix builds without tenferro or tensor4all in its dependency tree.
+- Core's Rust 1.85 feature matrix (default, `rayon`, `mpi`, `rsmpi-rt`, and their hybrids) builds without tenferro or tensor4all in its dependency tree; only the opt-in `tenferro` example feature adds `tenferro-tensor`.
 - Default and Rayon-only builds contain no MPI, serde, or bincode dependency.
 - `mpi` and pinned `rsmpi-rt` revision `6db6a2d6f96115b17c9a925e53ce719797c15dbb` each build the same Hataori MPI API; enabling both fails at compile time.
 - An `rsmpi-rt` build succeeds without MPI headers, a C compiler, or libclang, then passes a multi-rank smoke test with `MPI_RT_LIB` set.
@@ -500,7 +505,7 @@ Backend-specific errors do not enter the core error enum.
 - Remote object handles, channels, distributed reference counting, or distributed GC
 - Dynamic process creation; ranks are owned by the MPI launcher or scheduler
 - Transmitting Rust closures or executable code
-- Nonblocking data transfer, prefetch, request pipelines, or background MPI progress
+- Nonblocking data transfer, prefetch, request pipelines, or background MPI progress in P0; P1 added bounded prefetch, see Section 18
 - Using `MPI_THREAD_MULTIPLE` semantics or relaxing Hataori's single-MPI-thread rule
 - Multiple concurrently scheduled domains per rank
 - A dedicated coordinator CPU

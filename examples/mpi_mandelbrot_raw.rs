@@ -1,6 +1,21 @@
-use mandelbrot_common::{tensor_from_columns, Param};
-use mpi_upstream as mpi_api;
-use mpi_upstream::traits::*;
+//! Mandelbrot set with hand-written MPI: static round-robin distribution of
+//! columns and explicit point-to-point sends and receives.
+//!
+//! This is the baseline the Hataori examples are compared against:
+//! `mpi_mandelbrot_placement.rs` replaces the tags and receive loops with
+//! typed collectives, and `mpi_mandelbrot_pmap.rs` replaces the static split
+//! with dynamic scheduling.
+//!
+//! Build and run:
+//!
+//! ```sh
+//! cargo build --release --no-default-features --features mpi,tenferro \
+//!     --example mpi_mandelbrot_raw
+//! mpiexec -n 4 target/release/examples/mpi_mandelbrot_raw
+//! ```
+use mandelbrot_common::mpi_api;
+use mandelbrot_common::mpi_api::traits::*;
+use mandelbrot_common::{print_info, tensor_from_columns, Param};
 use std::time::Instant;
 use tenferro_tensor::Tensor;
 
@@ -93,14 +108,14 @@ fn main() {
     let size = world.size();
 
     if rank == 0 {
-        mandelbrot_common::print_info("Start processing Mandelbrot set...", "");
-        mandelbrot_common::print_info("MPI size", size);
+        print_info("Start processing Mandelbrot set...", "");
+        print_info("MPI size", size);
     }
 
-    let param = Param::default();
+    let param = Param::from_args();
     if rank == 0 {
-        mandelbrot_common::print_info("Parameters", format!("{:?}", param));
-        mandelbrot_common::print_info("Computing...", "");
+        print_info("Parameters", format!("{:?}", param));
+        print_info("Computing...", "");
     }
 
     let total_start = Instant::now();
@@ -109,31 +124,29 @@ fn main() {
 
     if rank == 0 {
         let result = result.expect("rank 0 must own the full result");
-        let slice = result.as_slice::<i64>().expect("result must be i64");
-        let max_val = slice.iter().max().copied().unwrap_or(0);
-        assert!(max_val > 0, "result must contain non-zero iteration counts");
+        let max_val = mandelbrot_common::max_iteration(&result);
 
-        mandelbrot_common::print_info("Performance metrics", "");
-        mandelbrot_common::print_info("  Total time", format!("{total_time} seconds"));
-        mandelbrot_common::print_info("  Computation time", format!("{compute_time} seconds"));
-        mandelbrot_common::print_info("  Data transfer time", format!("{transfer_time} seconds"));
-        mandelbrot_common::print_info(
+        print_info("Performance metrics", "");
+        print_info("  Total time", format!("{total_time} seconds"));
+        print_info("  Computation time", format!("{compute_time} seconds"));
+        print_info("  Data transfer time", format!("{transfer_time} seconds"));
+        print_info(
             "  Transfer ratio",
             format!("{}%", (transfer_time / total_time * 100.0).round()),
         );
-        mandelbrot_common::print_info("  Max iteration count", max_val);
+        print_info("  Max iteration count", max_val);
 
-        let png_path = "mandelbrot_raw.png";
-        mandelbrot_common::print_info("Saving PNG", png_path);
-        mandelbrot_common::save_png(&result, png_path);
+        let png_path = mandelbrot_common::output_path("mandelbrot_raw.png");
+        print_info("Saving PNG", &png_path);
+        mandelbrot_common::save_png(&result, &png_path);
 
-        mandelbrot_common::print_info("Done!", "");
+        print_info("Done!", "");
     } else {
-        mandelbrot_common::print_info(
+        print_info(
             &format!("Rank {rank} - Computation time"),
             format!("{compute_time} seconds"),
         );
-        mandelbrot_common::print_info(
+        print_info(
             &format!("Rank {rank} - Transfer time"),
             format!("{transfer_time} seconds"),
         );

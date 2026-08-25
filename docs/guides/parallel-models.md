@@ -12,8 +12,10 @@ Every model shares one contract:
 - input is a `Vec<T>`, output is a `Vec<U>` in the **same order**;
 - each successful input is evaluated **exactly once**;
 - the callback returns `Result<U, E>` with `E: Display`, and the first error
-  is reported with its zero-based input index and a message truncated to at
-  most 4096 bytes on a UTF-8 boundary;
+  is reported with a message truncated to at most 4096 bytes on a UTF-8
+  boundary; `map` and `map_in` also expose the zero-based failing input index
+  (`MapError::index()`), while `pmap` reports a `PmapErrorKind` plus the
+  message and an opaque converged `key()`;
 - calls are **synchronous** — the function returns when the whole operation
   has finished on the calling thread.
 

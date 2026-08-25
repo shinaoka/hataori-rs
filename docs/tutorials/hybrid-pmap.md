@@ -1,7 +1,8 @@
 # 5. Hybrid MPI + Rayon pmap
 
-**Model:** MPI ranks, each with its own Rayon pool. **Features:** `mpi` (or
-`rsmpi-rt`) **and** `rayon`.
+**Model:** MPI ranks, each with its own Rayon pool. **Features:**
+`mpi,rayon,tenferro` (or `rsmpi-rt,rayon,tenferro`). **Example:**
+`mpi_mandelbrot_hybrid`.
 
 With both feature groups enabled, `hataori::pmap` is the hybrid entry point.
 The collective protocol is the same as in [tutorial 3](mpi-pmap.md): the root
@@ -16,17 +17,18 @@ All MPI calls stay on the thread that calls `pmap`, while Rayon workers
 evaluate callbacks concurrently. That is exactly `MPI_THREAD_FUNNELED`, so
 ask for it explicitly and check what the implementation provided.
 
-<!-- snippet-source: docs/tutorial-code/src/bin/hybrid_pmap.rs#hybrid-init -->
+<!-- snippet-source: examples/mpi_mandelbrot_hybrid.rs#hybrid-init -->
 ```rust
 /// Hybrid `pmap` keeps every MPI call on the thread that initialized MPI
 /// while Rayon workers evaluate callbacks, so MPI must be initialized with
 /// at least `MPI_THREAD_FUNNELED`.
-fn initialize_funneled() -> mpi_api::environment::Universe {
-    let (universe, provided) = mpi_api::initialize_with_threading(Threading::Funneled)
-        .expect("MPI must not already be initialized");
+fn initialize_funneled() -> Universe {
+    let (universe, provided) =
+        mandelbrot_common::mpi_api::initialize_with_threading(Threading::Funneled)
+            .expect("MPI must not already be initialized or finalized");
     assert!(
         provided >= Threading::Funneled,
-        "hybrid pmap requires MPI_THREAD_FUNNELED or stronger"
+        "hybrid pmap requires MPI_THREAD >= Funneled"
     );
     universe
 }
@@ -35,75 +37,113 @@ fn initialize_funneled() -> mpi_api::environment::Universe {
 
 ## The collective call with a pooled domain
 
-<!-- snippet-source: docs/tutorial-code/src/bin/hybrid_pmap.rs#hybrid-call -->
+<!-- snippet-source: examples/mpi_mandelbrot_hybrid.rs#hybrid-call -->
 ```rust
-fn heavy(item: u64) -> Result<u64, String> {
-    // A callback that is worth spreading across threads and ranks.
-    let mut acc = 0_u64;
-    for k in 0..(1_000 + item * 100) {
-        acc = acc.wrapping_add(k * k % 7);
-    }
-    Ok(acc)
-}
-
 /// Every rank builds a Rayon domain and passes it to the collective. The
-/// root hands out batches to itself and to remote ranks; each rank runs
-/// its batch through its own pool with the requested `LocalMode`.
-fn run_hybrid<C: Communicator>(world: &C, workers: usize, prefetch: bool) -> Option<Vec<u64>> {
+/// root hands out batches to itself and to remote ranks; each rank runs its
+/// batch through its own pool with the requested `LocalMode`.
+fn render<C: Communicator>(
+    world: &C,
+    param: &Param,
+    workers: usize,
+    batch_size: NonZeroUsize,
+    prefetch: bool,
+) -> Option<Tensor> {
     let rank = world.rank();
-    let size = world.size();
+    let (x, y) = param.make_axes();
+
+    // The worker count may differ per rank; the `PmapOptions` must not.
     let cpu_set: Vec<usize> = (0..workers).collect();
     let domain = Domain::managed(cpu_set, workers).expect("rayon domain");
 
-    let items = (rank == 0).then(|| (0..64_u64).collect::<Vec<_>>());
-    // Batches should hold at least `workers` items so that `Outer` can
-    // spread one batch over the whole pool.
-    let batch_size = NonZeroUsize::new((64 / (size as usize * 4)).max(workers)).unwrap();
-    let options = PmapOptions {
-        root: 0,
-        batch_size,
-        local_mode: LocalMode::Outer,
-        // When true, each remote rank may hold one extra batch so that the
-        // next transfer overlaps the current computation.
-        prefetch,
-    };
+    let input = (rank == 0).then(|| (0..param.width).collect::<Vec<usize>>());
+    let columns = pmap(
+        world,
+        &domain,
+        PmapOptions {
+            batch_size,
+            // `Outer` spreads the columns of one batch over the pool.
+            local_mode: LocalMode::Outer,
+            // When true, each remote rank may hold one extra batch so that
+            // the next transfer overlaps the current computation.
+            prefetch,
+            ..PmapOptions::default()
+        },
+        input,
+        |col_idx| Ok::<_, String>(mandelbrot_common::compute_column(param, x[col_idx], &y)),
+    )
+    .expect("pmap must succeed");
 
-    pmap(world, &domain, options, items, heavy).expect("hybrid pmap must succeed")
+    columns.map(|columns| {
+        mandelbrot_common::tensor_from_ordered_columns(param.width, param.height, columns)
+    })
 }
 ```
 <!-- end-snippet-source -->
 
 - Every rank builds a `Domain::managed` (or `Domain::external`) pool; the
   worker count can differ per rank, but the `PmapOptions` must be identical.
-- `LocalMode::Outer` spreads one batch over the pool, so `batch_size`
-  should be at least the worker count. `Inner` is the choice when each
-  callback is itself a parallel kernel.
+- `LocalMode::Outer` spreads the columns of one batch over the pool, so
+  `batch_size` should be at least the worker count. `Inner` is the choice
+  when each callback is itself a parallel kernel, as in
+  [tutorial 2](rayon-map-in.md).
 - The callback and the values need the Rayon `Send`/`Sync` bounds in
-  addition to serde, but still not `'static`: `heavy` could borrow local
-  data.
+  addition to serde, but still not `'static`: the closure borrows `param`,
+  `x`, and `y`.
 - The call must originate outside any Rayon worker; calling `pmap` from
   inside a pool is rejected in preflight.
 
+## Batch size with a pool on every rank
+
+<!-- snippet-source: examples/mpi_mandelbrot_hybrid.rs#hybrid-batch-size -->
+```rust
+/// Columns per `pmap` batch.
+///
+/// The batch size is `width / (size * workers * factor)`, clamped to at
+/// least [`MIN_BATCH_COLUMNS`] columns and to at least `workers`, so that
+/// `LocalMode::Outer` can spread one batch over the whole pool. The factor is
+/// relative to the total number of compute threads (`size * workers`)
+/// because in hybrid mode every batch is internally subdivided by Rayon.
+fn batch_size(param: &Param, size: i32, workers: usize, factor: usize) -> NonZeroUsize {
+    let threads = (size as usize).max(1) * workers.max(1) * factor.max(1);
+    NonZeroUsize::new(
+        (param.width / threads)
+            .max(MIN_BATCH_COLUMNS)
+            .max(workers)
+            .min(param.width),
+    )
+    .expect("width is positive")
+}
+```
+<!-- end-snippet-source -->
+
+The `--batch-factor` is now relative to the total number of compute threads
+(`size × workers`), because each batch is subdivided again by Rayon inside
+the rank.
+
 ## Prefetch
 
-The binary runs the same call with `prefetch: false` and `prefetch: true`
-and checks that both give identical, ordered results. With prefetch on, each
-remote rank may hold one additional batch, so receiving the next batch and
-sending the previous results overlap the current computation. The root's own
-domain always stays at capacity one. The design and its bounds are described
-in [P1 bounded prefetch](../design/bounded-prefetch.md).
+The example renders the image twice, with `prefetch: false` and
+`prefetch: true`, and asserts that both give the identical image. With
+prefetch on, each remote rank may hold one additional batch, so receiving the
+next batch and sending the previous results overlap the current
+computation. The root's own domain always stays at capacity one. The design
+and its bounds are described in
+[P1 bounded prefetch](../design/bounded-prefetch.md).
 
-Source: [`docs/tutorial-code/src/bin/hybrid_pmap.rs`](https://github.com/shinaoka/hataori-rs/blob/main/docs/tutorial-code/src/bin/hybrid_pmap.rs)
+Source: [`examples/mpi_mandelbrot_hybrid.rs`](https://github.com/shinaoka/hataori-rs/blob/main/examples/mpi_mandelbrot_hybrid.rs)
 
 ## Build and run
 
 ```bash
-cargo build -p hataori-tutorial-code --features mpi,rayon --bin hybrid_pmap
-mpiexec -n 2 target/debug/hybrid_pmap
+cargo build --release --no-default-features --features mpi,rayon,tenferro \
+  --example mpi_mandelbrot_hybrid
+mpiexec -n 2 target/release/examples/mpi_mandelbrot_hybrid --workers 2 --width 1024 --height 1024
 ```
 
-On a laptop keep `ranks × workers` at or below the core count; the binary
-uses two workers per rank.
+On a laptop keep `ranks × workers` at or below the core count; `--workers`
+defaults to every logical core, which is the right value for one rank per
+node.
 
 ::: {.callout-warning}
 ## Launcher core binding vs. managed domains
@@ -114,12 +154,8 @@ rejects CPUs outside the process's affinity mask
 core by default for small jobs, which makes a two-worker managed domain
 fail. Either launch with `mpiexec --bind-to none` (or `--map-by
 node:PE=<workers>` to give each rank a core set), or use `Domain::external`
-with a pool the application built itself. The tutorial tests pass
-`--oversubscribe --bind-to none` to Open MPI for this reason.
+with a pool the application built itself. `scripts/check-tutorial-examples.sh`
+passes `--oversubscribe --bind-to none` to Open MPI for this reason.
 :::
-
-Real workload: [`examples/mpi_mandelbrot_hybrid.rs`](https://github.com/shinaoka/hataori-rs/blob/main/examples/mpi_mandelbrot_hybrid.rs)
-takes `--workers N` and `--batch-factor N` and renders the same image as the
-Rayon-only and MPI-only examples.
 
 Next: [6. Runtime-loaded MPI](rsmpi-rt.md).

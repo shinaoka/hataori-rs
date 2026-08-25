@@ -17,14 +17,16 @@
 //!     --example mpi_mandelbrot_hybrid
 //! mpiexec -n 4 target/release/examples/mpi_mandelbrot_hybrid --workers 2
 //! ```
+//!
+//! The same source builds against the runtime-loaded backend as
+//! `rsmpi_rt_mandelbrot_hybrid` with `--features rsmpi-rt,rayon,tenferro`.
 use hataori::{pmap, Domain, LocalMode, PmapOptions};
-use mandelbrot_common::{tensor_from_columns, Param};
-use mpi_upstream as mpi_api;
-use mpi_upstream::environment::Threading;
-use mpi_upstream::traits::Communicator;
-use std::env;
+use mandelbrot_common::mpi_api::environment::{Threading, Universe};
+use mandelbrot_common::mpi_api::traits::Communicator;
+use mandelbrot_common::{print_info, Param};
 use std::num::NonZeroUsize;
 use std::time::Instant;
+use tenferro_tensor::Tensor;
 
 #[path = "support/mandelbrot_common.rs"]
 mod mandelbrot_common;
@@ -35,84 +37,71 @@ mod mandelbrot_common;
 /// batch is a 512 KiB message. The same floor as `mpi_mandelbrot_pmap.rs`.
 const MIN_BATCH_COLUMNS: usize = 16;
 
-/// Parse an optional `--batch-factor N` command-line argument.
-///
-/// The batch size is `width / (size * workers * factor)`, clamped to at least
-/// [`MIN_BATCH_COLUMNS`] columns. The factor is relative to the total number
-/// of compute threads (`size * workers`) because in hybrid mode every batch is
-/// internally subdivided by Rayon.
-fn batch_factor_from_args() -> usize {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--batch-factor" {
-            if let Some(value) = args.next() {
-                return value.parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid --batch-factor value: {value}");
-                    std::process::exit(1);
-                });
-            }
-        }
-    }
-    32
+// snippet-start:hybrid-init
+/// Hybrid `pmap` keeps every MPI call on the thread that initialized MPI
+/// while Rayon workers evaluate callbacks, so MPI must be initialized with
+/// at least `MPI_THREAD_FUNNELED`.
+fn initialize_funneled() -> Universe {
+    let (universe, provided) =
+        mandelbrot_common::mpi_api::initialize_with_threading(Threading::Funneled)
+            .expect("MPI must not already be initialized or finalized");
+    assert!(
+        provided >= Threading::Funneled,
+        "hybrid pmap requires MPI_THREAD >= Funneled"
+    );
+    universe
 }
+// snippet-end:hybrid-init
 
-/// Parse an optional `--workers N` command-line argument.
+// snippet-start:hybrid-batch-size
+/// Columns per `pmap` batch.
 ///
-/// The number of Rayon compute threads per rank. Defaults to all logical
-/// cores reported by the OS (the node's core count in a node-per-rank
-/// deployment). For local benchmarks pass an explicit count so that
-/// `size * workers` stays within the machine's cores.
-fn workers_from_args() -> usize {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--workers" {
-            if let Some(value) = args.next() {
-                return value.parse().unwrap_or_else(|_| {
-                    eprintln!("Invalid --workers value: {value}");
-                    std::process::exit(1);
-                });
-            }
-        }
-    }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+/// The batch size is `width / (size * workers * factor)`, clamped to at
+/// least [`MIN_BATCH_COLUMNS`] columns and to at least `workers`, so that
+/// `LocalMode::Outer` can spread one batch over the whole pool. The factor is
+/// relative to the total number of compute threads (`size * workers`)
+/// because in hybrid mode every batch is internally subdivided by Rayon.
+fn batch_size(param: &Param, size: i32, workers: usize, factor: usize) -> NonZeroUsize {
+    let threads = (size as usize).max(1) * workers.max(1) * factor.max(1);
+    NonZeroUsize::new(
+        (param.width / threads)
+            .max(MIN_BATCH_COLUMNS)
+            .max(workers)
+            .min(param.width),
+    )
+    .expect("width is positive")
 }
+// snippet-end:hybrid-batch-size
 
-fn run_one<C: Communicator>(
+// snippet-start:hybrid-call
+/// Every rank builds a Rayon domain and passes it to the collective. The
+/// root hands out batches to itself and to remote ranks; each rank runs its
+/// batch through its own pool with the requested `LocalMode`.
+fn render<C: Communicator>(
     world: &C,
     param: &Param,
-    size: i32,
     workers: usize,
-) -> Option<tenferro_tensor::Tensor> {
+    batch_size: NonZeroUsize,
+    prefetch: bool,
+) -> Option<Tensor> {
     let rank = world.rank();
     let (x, y) = param.make_axes();
-    let width = param.width;
-    let height = param.height;
 
-    // macOS does not enforce affinity, but the cpu_set must be non-empty and
-    // at least as large as the worker count.
+    // The worker count may differ per rank; the `PmapOptions` must not.
     let cpu_set: Vec<usize> = (0..workers).collect();
     let domain = Domain::managed(cpu_set, workers).expect("rayon domain");
 
-    let factor = batch_factor_from_args();
-    let batch_size = NonZeroUsize::new(
-        (width / ((size as usize).max(1) * workers.max(1) * factor.max(1)))
-            .max(MIN_BATCH_COLUMNS)
-            .min(width),
-    )
-    .unwrap();
-    if rank == 0 {
-        mandelbrot_common::print_info("Batch factor", factor);
-        mandelbrot_common::print_info("Batch size", batch_size.get());
-    }
-    let input = (rank == 0).then(|| (0..width).collect::<Vec<usize>>());
+    let input = (rank == 0).then(|| (0..param.width).collect::<Vec<usize>>());
     let columns = pmap(
         world,
         &domain,
         PmapOptions {
             batch_size,
+            // `Outer` spreads the columns of one batch over the pool.
             local_mode: LocalMode::Outer,
+            // When true, each remote rank may hold one extra batch so that
+            // the next transfer overlaps the current computation.
+            prefetch,
             ..PmapOptions::default()
         },
         input,
@@ -120,50 +109,68 @@ fn run_one<C: Communicator>(
     )
     .expect("pmap must succeed");
 
-    columns.map(|col_data| {
-        let mut full_data = vec![0_i64; width * height];
-        for (col_idx, col) in (0..width).zip(col_data) {
-            full_data[col_idx * height..(col_idx + 1) * height].copy_from_slice(&col);
-        }
-        tensor_from_columns(width, height, full_data)
+    columns.map(|columns| {
+        mandelbrot_common::tensor_from_ordered_columns(param.width, param.height, columns)
     })
 }
+// snippet-end:hybrid-call
 
-fn main() {
-    let (universe, provided) = mpi_api::initialize_with_threading(Threading::Funneled)
-        .expect("MPI must not already be initialized or finalized");
-    assert!(
-        provided >= Threading::Funneled,
-        "hybrid pmap requires MPI_THREAD >= Funneled"
-    );
+/// `pub` so that the `rsmpi_rt_*` wrapper example can reuse this file.
+pub fn main() {
+    let universe = initialize_funneled();
     let world = universe.world();
     let rank = world.rank();
     let size = world.size();
-    let workers = workers_from_args();
+    let workers = mandelbrot_common::arg_thread_count("--workers");
 
+    let param = Param::from_args();
+    let factor = mandelbrot_common::arg_usize("--batch-factor", 32);
+    let batch_size = batch_size(&param, size, workers, factor);
     if rank == 0 {
-        mandelbrot_common::print_info("Start processing Mandelbrot set...", "");
-        mandelbrot_common::print_info("MPI size", size);
-        mandelbrot_common::print_info("Workers per rank", workers);
-    }
-
-    let param = Param::default();
-    if rank == 0 {
-        mandelbrot_common::print_info("Parameters", format!("{:?}", param));
-        mandelbrot_common::print_info("Computing...", "");
+        print_info("Start processing Mandelbrot set...", "");
+        print_info("Backend", mandelbrot_common::describe_backend());
+        print_info("MPI size", size);
+        print_info("Workers per rank", workers);
+        print_info("Parameters", format!("{:?}", param));
+        print_info("Batch factor", factor);
+        print_info("Batch size", batch_size.get());
+        print_info("Computing...", "");
     }
 
     let total_start = Instant::now();
-    let result = run_one(&world, &param, size, workers);
+    let result = render(&world, &param, workers, batch_size, false);
     let elapsed = total_start.elapsed();
-
     if rank == 0 {
-        mandelbrot_common::print_info("Total time", format!("{:.3} s", elapsed.as_secs_f64()));
+        print_info("Total time", format!("{:.3} s", elapsed.as_secs_f64()));
     }
 
-    if let Some(tensor) = result {
-        let png_path = "mandelbrot_hybrid.png";
-        mandelbrot_common::save_png(&tensor, png_path);
-        mandelbrot_common::print_info("Saved", png_path);
+    // The same call with bounded prefetch must produce the identical image.
+    let prefetch_start = Instant::now();
+    let with_prefetch = render(&world, &param, workers, batch_size, true);
+    let prefetch_elapsed = prefetch_start.elapsed();
+    if rank == 0 {
+        print_info(
+            "Total time (prefetch)",
+            format!("{:.3} s", prefetch_elapsed.as_secs_f64()),
+        );
+    }
+
+    match (result, with_prefetch) {
+        (Some(tensor), Some(prefetched)) => {
+            assert_eq!(
+                tensor.as_slice::<i64>().expect("i64 image"),
+                prefetched.as_slice::<i64>().expect("i64 image"),
+                "prefetch must not change the result"
+            );
+            print_info(
+                "Max iteration count",
+                mandelbrot_common::max_iteration(&tensor),
+            );
+            let png_path = mandelbrot_common::output_path("mandelbrot_hybrid.png");
+            mandelbrot_common::save_png(&tensor, &png_path);
+            print_info("Saved", png_path);
+        }
+        (None, None) => {}
+        _ => panic!("only the root receives the result"),
     }
 }
