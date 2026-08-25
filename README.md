@@ -137,6 +137,9 @@ on [tensor4all-rs#663](https://github.com/tensor4all/tensor4all-rs/issues/663).
 
 - [P0 design](docs/design.md)
 - [P1 bounded-prefetch design](docs/design/bounded-prefetch.md)
+- [Long-term distributed-runtime design](docs/design/distributed-runtime.md)
+- [Object placement and locality-aware task API](docs/design/object-placement-api.md)
 - [Implementation readiness and validation matrix](docs/implementation-readiness.md)
 - [Review gate log](docs/review-log.md)
-- [Implementation tracker](https://github.com/shinaoka/hataori-rs/issues/1)
+- [P0 implementation tracker](https://github.com/shinaoka/hataori-rs/issues/1)
+- [Long-term distributed-runtime tracker](https://github.com/shinaoka/hataori-rs/issues/14)

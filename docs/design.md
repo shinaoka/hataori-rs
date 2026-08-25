@@ -512,6 +512,22 @@ Backend-specific errors do not enter the core error enum.
 
 ## 18. P1 bounded prefetch and later gates
 
+The broader, compatibility-breaking direction toward a long-lived MPI/TCP
+runtime, typed actions and futures, migration-ready remote objects, and
+mechanical resource-lifecycle management is specified separately in
+[`design/distributed-runtime.md`](design/distributed-runtime.md). The design in
+this file remains the source of truth for the implemented synchronous P0/P1
+architecture; the long-term document must not be read as a claim that those
+runtime capabilities already exist.
+
+The long-term design includes a supported current-style `map`/`map_in`/`pmap`
+sugar facade, but does not require source compatibility with these exact
+signatures. Commit `34cb1b1371c8b2f8ef750e2d49d10f9ef8f0782e` is the fixed
+legacy performance reference. The P0/P1 execution path must not be replaced
+until the paired legacy-continuity and sugar-transparency gates in the
+long-term design pass; a failed or inconclusive required case blocks
+replacement.
+
 P1 adds the opt-in, default-off bounded-prefetch mode specified in
 [`design/bounded-prefetch.md`](design/bounded-prefetch.md). It permits exactly
 one running and one prefetched batch on each remote hybrid domain. The MPI
