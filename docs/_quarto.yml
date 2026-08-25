@@ -1,0 +1,84 @@
+project:
+  type: website
+  output-dir: ../target/docs-site
+  render:
+    - index.md
+    - getting-started/**/*.md
+    - guides/**/*.md
+    - tutorials/**/*.md
+    - api/index.md
+    - design.md
+    - design/**/*.md
+    - implementation-readiness.md
+    - review-log.md
+    - core-acceptance-ledger.md
+    - tenferro-acceptance-ledger.md
+    - "!superpowers/**"
+    - "!tutorial-code/**"
+
+format:
+  html:
+    theme: flatly
+    toc: true
+    code-overflow: wrap
+    code-copy: true
+
+website:
+  title: "Hataori"
+  repo-url: https://github.com/shinaoka/hataori-rs
+  navbar:
+    left:
+      - text: "Getting Started"
+        href: getting-started/index.md
+      - text: "Parallel Models"
+        href: guides/parallel-models.md
+      - text: "Tutorials"
+        href: tutorials/index.md
+      - text: "API"
+        href: api/index.md
+    right:
+      - icon: github
+        href: https://github.com/shinaoka/hataori-rs
+  sidebar:
+    style: docked
+    contents:
+      - index.md
+      - section: "Getting Started"
+        contents:
+          - getting-started/index.md
+      - section: "Guides"
+        contents:
+          - text: "Parallel Execution Models"
+            href: guides/parallel-models.md
+          - text: "Choosing Features and Backends"
+            href: guides/features-and-backends.md
+      - section: "Tutorials"
+        contents:
+          - tutorials/index.md
+          - text: "1. Serial map"
+            href: tutorials/serial-map.md
+          - text: "2. Rayon map_in"
+            href: tutorials/rayon-map-in.md
+          - text: "3. MPI pmap"
+            href: tutorials/mpi-pmap.md
+          - text: "4. MPI placement collectives"
+            href: tutorials/mpi-placement.md
+          - text: "5. Hybrid MPI + Rayon pmap"
+            href: tutorials/hybrid-pmap.md
+          - text: "6. Runtime-loaded MPI (rsmpi-rt)"
+            href: tutorials/rsmpi-rt.md
+      - section: "API"
+        contents:
+          - api/index.md
+      - section: "Design"
+        contents:
+          - text: "P0 design"
+            href: design.md
+          - text: "P1 bounded prefetch"
+            href: design/bounded-prefetch.md
+          - text: "tenferro adapter"
+            href: design/tenferro-adapter.md
+          - implementation-readiness.md
+          - review-log.md
+          - core-acceptance-ledger.md
+          - tenferro-acceptance-ledger.md

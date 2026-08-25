@@ -1,0 +1,71 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/build_docs_site.sh"
+      - "scripts/check-doc-snippets.py"
+      - ".github/workflows/docs.yml"
+      - "src/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Open MPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libopenmpi-dev openmpi-bin
+      - name: Install Quarto
+        uses: quarto-dev/quarto-actions/setup@v2
+      - name: Configure GitHub Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+        with:
+          # Enables Pages with the "GitHub Actions" source on first deploy so no
+          # manual repository-settings step is needed.
+          enablement: true
+      - name: Run tutorial code
+        env:
+          HATAORI_MPIEXEC: mpiexec
+          HATAORI_MPI_RANKS: "2"
+          # Hosted runners have few cores; let 2 ranks x 2 workers oversubscribe.
+          OMPI_MCA_rmaps_base_oversubscribe: "1"
+        run: docs/tutorial-code/scripts/check.sh
+      - name: Build docs site
+        run: scripts/build_docs_site.sh
+      - name: Upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/docs-site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

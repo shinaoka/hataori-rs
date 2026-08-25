@@ -1,5 +1,5 @@
 [workspace]
-members = ["adapters/tenferro"]
+members = ["adapters/tenferro", "docs/tutorial-code"]
 default-members = ["."]
 resolver = "2"
 
