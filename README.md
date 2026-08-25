@@ -64,6 +64,70 @@ cargo build --example rsmpi_rt_pmap_smoke --no-default-features --features rsmpi
 MPI_RT_LIB=/absolute/path/to/libmpiwrapper.so mpiexec -n 4 target/debug/examples/rsmpi_rt_pmap_smoke && echo "pmap smoke OK"
 ```
 
+## Developer guide: working on the documentation
+
+The site under `docs/` is a [Quarto](https://quarto.org) website. The
+tutorial pages quote Rust code verbatim from the `docs/tutorial-code`
+workspace member, and CI rejects pages that drift from that code.
+
+### Preview locally
+
+From the repository root:
+
+```bash
+quarto preview docs
+```
+
+Quarto opens a browser (default `http://localhost:4xxx/`) and re-renders and
+reloads the page whenever a file under `docs/**/*.md` is saved. To keep the
+browser closed or pin the port:
+
+```bash
+quarto preview docs --no-browser --port 4321
+```
+
+The rendered site goes to `target/docs-site/`, as configured in
+`docs/_quarto.yml`.
+
+### Include the API reference in the preview
+
+`quarto preview` only regenerates the Quarto pages. The rustdoc served under
+`api/hataori/…` must be placed there once by a full build; after that the
+preview keeps serving it while you edit:
+
+```bash
+scripts/build_docs_site.sh   # snippet check -> rustdoc -> Quarto -> copy into api/
+quarto preview docs          # live reload from here on
+```
+
+`scripts/build_docs_site.sh` is the same script CI runs to publish the site.
+
+### Edit tutorial code
+
+The Rust blocks in `docs/tutorials/` and `docs/index.md` are copies of the
+regions between `// snippet-start:NAME` and `// snippet-end:NAME` in
+`docs/tutorial-code/src/`. After changing a `.rs` file, re-sync the Markdown:
+
+```bash
+python3 scripts/check-doc-snippets.py
+```
+
+CI runs the same script with `--check` and fails on stale snippets or on any
+` ```rust ` fence in the guides and tutorials that is not backed by a
+snippet marker. Run the tutorial binaries themselves with:
+
+```bash
+cargo test -p hataori-tutorial-code --features rayon   # single-process tutorials
+docs/tutorial-code/scripts/check.sh                    # all lanes; MPI ones via mpiexec -n 2
+```
+
+### Publishing
+
+`.github/workflows/docs.yml` runs the tutorial lanes, builds the site, and
+deploys it to GitHub Pages on every push to `main`; pull requests only build.
+Deployment requires the repository's Pages source to be set to "GitHub
+Actions" once by an administrator.
+
 ## Status
 
 Hataori's P0 core and tenferro-only adapter foundation are implemented. P1 adds
