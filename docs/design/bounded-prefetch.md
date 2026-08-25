@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved for implementation. The independent pre-implementation review gate is recorded in `docs/review-log.md`.
+Implemented (commit `f7050ad`, PR #3). The pre-implementation review gate is recorded in `docs/review-log.md`.
 
 ## Scope
 

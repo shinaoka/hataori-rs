@@ -1,6 +1,6 @@
 # Phase 20a: tenferro adapter
 
-**Status:** Proposed for pre-implementation review
+**Status:** Implemented (commit `c2cb8fb`, PR #2); this document records the design as reviewed.
 
 **Scope:** A tenferro-only adapter over Hataori's existing whole-domain `Inner`
 execution contract. tensor4all contexts, tensor transport, and tensor
@@ -10,19 +10,27 @@ reconstruction remain Phase 20b and are not part of this change.
 
 ## 1. Crate and dependency boundary
 
-Add one non-publishable workspace member, `hataori-tenferro`, instead of adding
-tenferro to the `hataori` package. The adapter depends on:
+Add one non-publishable workspace member, `hataori-tenferro`, instead of
+binding tenferro's backend inside the `hataori` package. (The root package
+separately has an opt-in `tenferro` feature that adds only `tenferro-tensor`
+for the Mandelbrot examples; it is not part of the adapter contract.) The
+adapter depends on:
 
 - local `hataori` with `rayon` enabled;
+- `rayon = "1.10"` directly, for the `ThreadPool` handle it inspects;
 - `tenferro-cpu` and `tenferro-tensor` at the exact upstream merge revision;
 - no tensor4all crate and no MPI backend.
 
-The root manifest becomes a package-plus-workspace with
-`members = ["adapters/tenferro"]`, `default-members = ["."]`, and resolver 2.
+The root manifest becomes a package-plus-workspace whose `members` list gains
+`adapters/tenferro`, with `default-members = ["."]` and resolver 2.
 Consequently ordinary root `cargo build`/`cargo test` still select only
-`hataori`. The root package remains dependency-free by default and its existing
-Rust 1.85 feature matrix remains unchanged, including a fresh Rust 1.85 check
-with the workspace member present. The adapter follows the pinned tenferro
+`hataori`. The root package remains dependency-free by default and its
+Rust 1.85 feature matrix (default, `rayon`, `mpi`, `rsmpi-rt`, and hybrids)
+remains free of tenferro, including a fresh Rust 1.85 check with the workspace
+member present. The root package's opt-in `tenferro` example feature is outside
+that matrix: it pulls `tenferro-tensor` and therefore also needs Rust >= 1.96;
+`scripts/check-tutorial-examples.sh` builds and runs the Mandelbrot examples
+with the `tenferro` feature. The adapter follows the pinned tenferro
 revision's Rust 1.96 MSRV and has a separate current-stable CI/gate invocation.
 A crates.io release is out of scope while its upstream dependency is a git
 revision.

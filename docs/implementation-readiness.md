@@ -1,17 +1,17 @@
 # Hataori P0 Implementation Readiness
 
-**Status:** Core design implementation-ready with recorded `Correct-to-merge`; optional tensor integration remains upstream-blocked.
+**Status:** Core, P1 bounded prefetch, and the tenferro adapter foundation are implemented (see [`core-acceptance-ledger.md`](core-acceptance-ledger.md) and [`tenferro-acceptance-ledger.md`](tenferro-acceptance-ledger.md)); the tensor4all context/reconstruction adapter remains upstream-blocked.
 
-This document records why the core design is implementable, what evidence is still required, and what must not be built early. The canonical behavior remains in [`design.md`](design.md).
+This document records why the core design was judged implementable, what evidence the implementation had to produce, and what must not be built early. The canonical behavior remains in [`design.md`](design.md).
 
 ## 1. Scope split
 
 | Scope | Readiness |
 |---|---|
-| Hataori core | Implementation-ready; independent review `Correct-to-merge` |
-| tenferro adapter foundation | Ready: tenferro-rs #1716 completed by PR #1717 |
+| Hataori core | Implemented; independent review `Correct-to-merge`; delivered matrix in `core-acceptance-ledger.md` |
+| tenferro adapter foundation | Implemented (`adapters/tenferro`, commit `c2cb8fb`) against tenferro-rs #1716/PR #1717; ledger in `tenferro-acceptance-ledger.md` |
 | tensor4all context/reconstruction adapter | Blocked on tensor4all-rs #663 |
-| P1 bounded prefetch | Implementation-ready; independent review `Correct-to-merge` recorded in `docs/review-log.md` |
+| P1 bounded prefetch | Implemented (commit `f7050ad`); independent review `Correct-to-merge` recorded in `docs/review-log.md` |
 | Expanding queues and multiple domains | Deferred behind separate evidence gates in `design.md` |
 
 Core implementation and release do not wait for the tensor adapter. Integrated tensor compatibility must not be claimed until both upstream contracts and the joint gate pass.
@@ -133,7 +133,7 @@ Commands become runnable when Step 1 creates `Cargo.toml`; they are merge gates 
 - reverse completion preserves input order and every successful index executes once;
 - a deterministic skew fixture records each dynamic assignment, sums item costs per lane, and proves the maximum dynamic lane cost is strictly lower than the maximum static-contiguous lane cost for the same items;
 - with `prefetch = false`, trace assertions prove `running <= 1`, `prefetched = 0`, one complete result per batch, and one STOP/DRAIN per remote rank; root dispatch while running is a state-preserving typed error;
-- preflight mismatch or an agreed root outside `[0, world_size)` emits no scheduler traffic, and a largest possible error key at or above `i64::MAX` returns the typed preflight failure;
+- preflight mismatch or an agreed root outside `[0, world_size)` emits no scheduler traffic; error-key encoding is validated when an error is reported (`ErrorKey::new` unit tests in `src/wire.rs`), and a key at or above `i64::MAX` aborts the job with code 72 rather than returning a typed error;
 - version, kind, source/tag, length/count, overflow, truncation, and trailing-byte failures are typed;
 - simultaneous user/wire failures select one signed deterministic key on every rank; after failure, every assigned completion is fully validated, valid values are discarded, and malformed metadata leaves state/results unchanged; a corrupt received batch ID releases the running lane only through its coordinator-pinned batch metadata before the next READY→STOP;
 - recoverable failure leaves the caller communicator reusable and no private frame unmatched;

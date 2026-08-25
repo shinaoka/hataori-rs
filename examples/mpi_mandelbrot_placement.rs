@@ -1,28 +1,32 @@
-# 4. MPI placement collectives
+//! Mandelbrot set with static distribution through Hataori's placement
+//! collectives: `broadcast` the parameters, `scatter` one contiguous block of
+//! column indices to every rank, compute locally, and `gather` the blocks on
+//! the root.
+//!
+//! This is the collective counterpart of `mpi_mandelbrot_raw.rs`: the same
+//! static split, but every transfer is one typed collective over serde
+//! values instead of hand-written tags, counts, and receive loops. Unlike
+//! `pmap`, nothing rebalances the uneven column costs, so it is also a
+//! baseline for what dynamic scheduling buys.
+//!
+//! Build and run:
+//!
+//! ```sh
+//! cargo build --release --no-default-features --features mpi,tenferro \
+//!     --example mpi_mandelbrot_placement
+//! mpiexec -n 4 target/release/examples/mpi_mandelbrot_placement
+//! ```
+use hataori::{broadcast, gather, scatter};
+use mandelbrot_common::mpi_api::traits::Communicator;
+use mandelbrot_common::{print_info, Param};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
+use tenferro_tensor::Tensor;
 
-**Model:** moving owned values between ranks. **Features:** `mpi,tenferro`
-(or `rsmpi-rt,tenferro`). **Example:** `mpi_mandelbrot_placement`.
+#[path = "support/mandelbrot_common.rs"]
+mod mandelbrot_common;
 
-Besides `pmap`, the MPI backends provide three collectives for serde values.
-They complement `pmap`: use `broadcast` for parameters every rank needs,
-`scatter` to give each rank its own shard, and `gather` to collect one value
-per rank on the root.
-
-| Collective | Root passes | Every rank receives |
-| --- | --- | --- |
-| `broadcast(world, root, Option<T>)` | `Some(value)` | an owned copy of `value` |
-| `scatter(world, root, Option<Vec<T>>)` | `Some(shards)` with exactly one shard per rank | its rank-indexed shard |
-| `gather(world, root, T)` | (every rank passes one value) | root: `Some(Vec<T>)` in rank order; others: `None` |
-
-This tutorial renders the Mandelbrot image with a **static** split: the
-root broadcasts the parameters, scatters one contiguous block of column
-indices to each rank, every rank computes its block, and the root gathers
-the blocks.
-
-## Serializable value types
-
-<!-- snippet-source: examples/mpi_mandelbrot_placement.rs#placement-types -->
-```rust
+// snippet-start:placement-types
 /// Values that cross rank boundaries need serde. `Param` itself lives in the
 /// shared example module and derives nothing, so wrap the fields the ranks
 /// need.
@@ -71,17 +75,9 @@ struct Block {
     first_column: usize,
     columns: Vec<Vec<i64>>,
 }
-```
-<!-- end-snippet-source -->
+// snippet-end:placement-types
 
-Only the values that cross rank boundaries need serde: the shared `Param`
-is mirrored into a `Region`, and a rank's result is a `Block` of columns
-with the index of its first column.
-
-## The three collectives
-
-<!-- snippet-source: examples/mpi_mandelbrot_placement.rs#placement-call -->
-```rust
+// snippet-start:placement-call
 /// Static distribution with the three collectives. Every rank calls each
 /// collective in the same order with the same root.
 fn render<C: Communicator>(world: &C, root_param: Option<Param>) -> Option<Tensor> {
@@ -133,38 +129,44 @@ fn render<C: Communicator>(world: &C, root_param: Option<Param>) -> Option<Tenso
         mandelbrot_common::tensor_from_columns(param.width, param.height, full_data)
     })
 }
-```
-<!-- end-snippet-source -->
+// snippet-end:placement-call
 
-- Only the root parses the command line; `broadcast` delivers the
-  parameters to everyone.
-- `scatter` requires exactly one shard per rank on the root. Each shard here
-  is a contiguous range, so neighbouring ranks get neighbouring columns — and,
-  near the set, very different amounts of work.
-- The compute step in the middle is plain Rust; no Hataori call is involved.
-- `gather` returns the blocks in rank order on the root, which then places
-  each block by its `first_column`.
+/// `pub` so that the `rsmpi_rt_*` wrapper example can reuse this file.
+pub fn main() {
+    let universe = mandelbrot_common::mpi_api::initialize()
+        .expect("MPI must not already be initialized or finalized");
+    let world = universe.world();
+    let rank = world.rank();
+    let size = world.size();
 
-Errors are `PlacementError` values with a `PlacementErrorKind`; like `pmap`,
-a failure (for example a serialization error on one rank) converges to the
-same error on every rank.
+    // Only the root parses the parameters; `broadcast` delivers them.
+    let root_param = (rank == 0).then(Param::from_args);
+    if let Some(param) = root_param {
+        print_info("Start processing Mandelbrot set...", "");
+        print_info("Backend", mandelbrot_common::describe_backend());
+        print_info("MPI size", size);
+        print_info("Parameters", format!("{:?}", param));
+        print_info("Computing...", "");
+    }
 
-Source: [`examples/mpi_mandelbrot_placement.rs`](https://github.com/shinaoka/hataori-rs/blob/main/examples/mpi_mandelbrot_placement.rs)
+    let total_start = Instant::now();
+    let result = render(&world, root_param);
+    let total_time = total_start.elapsed().as_secs_f64();
 
-## Build and run
+    if rank == 0 {
+        let result = result.expect("rank 0 must receive the full result");
+        print_info("Performance metrics", "");
+        print_info("  Total time", format!("{total_time} seconds"));
+        print_info(
+            "  Max iteration count",
+            mandelbrot_common::max_iteration(&result),
+        );
 
-```bash
-cargo build --release --no-default-features --features mpi,tenferro \
-  --example mpi_mandelbrot_placement
-mpiexec -n 4 target/release/examples/mpi_mandelbrot_placement --width 1024 --height 1024
-```
-
-## Static versus dynamic
-
-Compare the total time with [tutorial 3](mpi-pmap.md) at the same size and
-rank count. The collectives make the static version as short to write as
-the `pmap` one, but nothing rebalances the uneven columns: the rank whose
-block crosses the set finishes last while the others wait in `gather`.
-That gap is what `pmap`'s dynamic scheduling removes.
-
-Next: [5. Hybrid MPI + Rayon pmap](hybrid-pmap.md).
+        let png_path = mandelbrot_common::output_path("mandelbrot_placement.png");
+        print_info("Saving PNG", &png_path);
+        mandelbrot_common::save_png(&result, &png_path);
+        print_info("Done!", "");
+    } else {
+        assert!(result.is_none(), "only the root receives the result");
+    }
+}

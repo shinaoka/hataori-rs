@@ -200,9 +200,12 @@ impl TenferroDomain {
     ///
     /// This method must be called from the bound pool inside an admitted
     /// [`hataori::LocalMode::Inner`] callback. Pool membership is checked before
-    /// `operation` runs. tenferro's shared caller-managed guard rejects
-    /// simultaneous or recursive adapter entry with a typed error before the
-    /// closure runs. tenferro retains its own final public-backend guard.
+    /// `operation` runs. The adapter's own atomic entry gate rejects
+    /// simultaneous or recursive adapter entry with
+    /// [`TenferroAdapterError::ConcurrentEntry`] before the closure runs, so
+    /// tenferro's shared caller-managed guard, which would panic on such
+    /// re-entry, is never reached. tenferro retains its own final
+    /// public-backend guard.
     ///
     /// # Examples
     ///

@@ -259,7 +259,7 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Safety-delta fixes: pinned `MPI_Abort(75)`, the join-before-abort/unmatched-frame rationale, exact live-job sites, unchanged root/P0 behavior, and a result-serialization fault with a deliberately live N+1 callback.
 - Safety-delta exact-state verdict: **Correct-to-merge**
 - Gate status: **COMPLETE — P1 bounded-prefetch implementation may start**
-- Implementation commit reviewed: `3285940b06f6a562c8ca65e55d11469d82b5783a`
+- Implementation commit reviewed: `f7050ad` (`feat: add bounded hybrid prefetch`, merged as PR #3 in `d829280`); the hash previously recorded here referred to a pre-merge revision that is not in this repository's history
 - Post-implementation reviewer: `reviewer-flash-opencode-go` (DeepSeek family, read-only, `high`)
 - Full-diff evidence: all 1,864 lines / 77,341 bytes of `/tmp/hataori-p1-full.diff` inspected with current-source context
 - Post-implementation verdict: **Correct-to-merge**

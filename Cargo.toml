@@ -1,5 +1,5 @@
 [workspace]
-members = ["adapters/tenferro", "docs/tutorial-code"]
+members = ["adapters/tenferro"]
 default-members = ["."]
 resolver = "2"
 
@@ -60,6 +60,14 @@ name = "mpi_mandelbrot_pmap"
 required-features = ["mpi", "tenferro"]
 
 [[example]]
+name = "mpi_mandelbrot_placement"
+required-features = ["mpi", "tenferro"]
+
+[[example]]
+name = "serial_mandelbrot"
+required-features = ["tenferro"]
+
+[[example]]
 name = "rsmpi_rt_placement_smoke"
 required-features = ["rsmpi-rt"]
 
@@ -70,3 +78,15 @@ required-features = ["rayon", "tenferro"]
 [[example]]
 name = "mpi_mandelbrot_hybrid"
 required-features = ["mpi", "rayon", "tenferro"]
+
+[[example]]
+name = "rsmpi_rt_mandelbrot_pmap"
+required-features = ["rsmpi-rt", "tenferro"]
+
+[[example]]
+name = "rsmpi_rt_mandelbrot_placement"
+required-features = ["rsmpi-rt", "tenferro"]
+
+[[example]]
+name = "rsmpi_rt_mandelbrot_hybrid"
+required-features = ["rsmpi-rt", "rayon", "tenferro"]

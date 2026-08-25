@@ -34,52 +34,22 @@ collectives for owned values.
 ## Thirty-second example
 
 Serial execution needs no features and no trait bounds beyond `Display` on the
-error type:
+error type. Every tutorial renders the same Mandelbrot image, one column per
+item; this is the serial version:
 
-<!-- snippet-source: docs/tutorial-code/src/bin/serial_map.rs#serial-map -->
+<!-- snippet-source: examples/serial_mandelbrot.rs#serial-map -->
 ```rust
-use hataori::{map, MapError};
-
-/// A callback error type: anything that implements `Display` works.
-#[derive(Debug)]
-struct NegativeInput(i64);
-
-impl std::fmt::Display for NegativeInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "negative input: {}", self.0)
-    }
-}
-
-fn checked_square(item: i64) -> Result<i64, NegativeInput> {
-    if item < 0 {
-        return Err(NegativeInput(item));
-    }
-    Ok(item * item)
-}
-
-fn main() {
-    // `map` applies the callback one item at a time, in order, on the calling
-    // thread. Nothing here needs `Send`, `Sync`, `'static`, or serde.
-    let squares = map(vec![1_i64, 2, 3, 4], checked_square).expect("all inputs are non-negative");
-    assert_eq!(squares, vec![1, 4, 9, 16]);
-
-    // The callback may borrow local state; a counter shows the exactly-once
-    // evaluation and the stop-at-first-error rule.
-    let mut calls = 0_usize;
-    let error: MapError = map(vec![5_i64, -1, 7], |item| {
-        calls += 1;
-        checked_square(item)
+/// Render every column in input order on the calling thread.
+///
+/// `map` takes a `Vec<T>` and a fallible callback and returns a `Vec<U>` in
+/// the same order, or the first error together with the failing index. The
+/// callback borrows `param`, `x`, and `y` from the caller's stack.
+fn render(param: &Param) -> Result<Vec<Vec<i64>>, MapError> {
+    let (x, y) = param.make_axes();
+    let columns: Vec<usize> = (0..param.width).collect();
+    map(columns, |col_idx| {
+        Ok::<_, String>(mandelbrot_common::compute_column(param, x[col_idx], &y))
     })
-    .expect_err("the second item fails");
-    assert_eq!(error.index(), 1);
-    assert_eq!(error.message(), "negative input: -1");
-    // Evaluation stopped at the failing item: `7` was never visited.
-    assert_eq!(calls, 2);
-
-    println!(
-        "serial_map: {squares:?}; first error at index {}",
-        error.index()
-    );
 }
 ```
 <!-- end-snippet-source -->
@@ -89,6 +59,6 @@ Every other model keeps the same shape — a `Vec<T>` in, a
 the model needs: a `Domain` for Rayon, an MPI communicator plus `PmapOptions`
 for MPI and hybrid runs.
 
-All tutorial snippets are compiled and executed by
-`cargo test -p hataori-tutorial-code`; see
+All tutorial snippets are quoted from `examples/` and are compiled and run by
+`scripts/check-tutorial-examples.sh`; see
 [Tutorials](tutorials/index.md#running-the-tutorial-code).

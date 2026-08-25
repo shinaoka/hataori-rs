@@ -49,15 +49,17 @@ decision rules. The short version:
 
 ## Run the tutorial code
 
-The tutorial pages quote `docs/tutorial-code`, a non-published workspace
-member. From the repository root:
+The tutorial pages quote the Mandelbrot examples under `examples/`. They use
+the `tenferro` feature for the image tensor, which needs Rust 1.96 or newer
+(the library itself keeps 1.85). From the repository root:
 
 ```bash
-# serial and Rayon tutorials
-cargo test -p hataori-tutorial-code --features rayon
+# one process, one thread, at a small size
+cargo run --release --no-default-features --features tenferro \
+  --example serial_mandelbrot -- --width 512 --height 512
 
-# every tutorial, launching the MPI binaries with `mpiexec -n 2`
-docs/tutorial-code/scripts/check.sh
+# every tutorial example, launching the MPI ones with `mpiexec -n 2`
+scripts/check-tutorial-examples.sh
 ```
 
 Each MPI tutorial can also be built and launched by hand; the tutorial pages

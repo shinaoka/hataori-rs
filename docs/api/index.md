@@ -13,10 +13,10 @@ enables them. The `rsmpi-rt` backend exposes the same items as `mpi`.
 | Model | Items |
 | --- | --- |
 | Serial | `map`, `MapError` |
-| Rayon | `map_in`, `MapInError`, `Domain::managed`, `Domain::external`, `LocalMode`, `PoolOwnership`, `PlacementStatus`, `DomainBuildError` |
+| Rayon | `map_in`, `MapInError`, `Domain::managed`, `Domain::external`, `PoolOwnership`, `PlacementStatus`, `DomainBuildError` |
 | MPI and hybrid | `pmap`, `PmapOptions`, `PmapError`, `PmapErrorKind`, `Domain::sequential` |
 | Placement | `broadcast`, `scatter`, `gather`, `PlacementError`, `PlacementErrorKind` |
-| Common | `Domain`, `DomainId`, `Place`, `DomainAdmission`, `DomainBusy` |
+| Common | `Domain`, `DomainId`, `LocalMode`, `Place`, `DomainAdmission`, `DomainBusy`, `NegativeRank`, `UnsupportedDomainId` |
 
 Build it locally with:
 

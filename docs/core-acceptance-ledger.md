@@ -33,7 +33,7 @@ Open MPI and runs the same entry point. No prebuilt fixture or secret is used.
 
 | Acceptance criterion | Evidence |
 |---|---|
-| Empty, world size one, extra ranks, batch 1 and larger fixed batches | MPI-only smoke in both backends (`check-rsmpi-rt.sh`); explicit one-item n=4 and delayed batches in `mpi_pmap_smoke.rs` / `rsmpi_rt_pmap_smoke.rs` |
+| Empty, world size one, extra ranks, batch 1 and larger fixed batches | MPI-only smoke in both backends (upstream via `check-hybrid.sh`, runtime via `check-rsmpi-rt.sh`); explicit one-item n=4 and delayed batches in `mpi_pmap_smoke.rs` / `rsmpi_rt_pmap_smoke.rs` |
 | Execute once and preserve order under delayed/reverse completions | delayed callback smoke with global call-count reduction; scheduler `reverse_completion_restores_order_and_metadata_is_exact` |
 | Dynamic skew improves over static contiguous assignment | scheduler `dynamic_skew_beats_static_contiguous_assignment` |
 | Capacity one, no prefetch, exact completion, one STOP/DRAIN | scheduler running-slot, ready/stop/drain, error/drain, and transactional-completion tests |

@@ -15,12 +15,14 @@ engine to a long-lived distributed runtime. The resulting design fixes the
 layer boundaries, common MPI/TCP contract, identity and location model, remote
 object lifetime rules, migration state machine, bounded-resource policy, and
 phased acceptance gates without claiming that those facilities are implemented.
-The repository now follows the same shared-rule routing pattern as tenferro-rs.
-A follow-up added a supported current-style facade and made performance
-continuity with the exact current implementation a blocking Phase E gate.
-Another follow-up specified exact remote-object placement, object-colocated task
-affinity, and synchronized access from the owning domain's Rayon workers while
-keeping security mechanisms outside the trusted initial runtime.
+The repository now follows the same shared-rule routing pattern as tenferro-rs:
+`REPOSITORY_RULES.md` was created, and `README.md` and `docs/design.md` gained
+cross-links to the new documents. The design also includes a supported
+current-style facade, makes performance continuity with the exact current
+implementation a blocking Phase E gate, and specifies exact remote-object
+placement, object-colocated task affinity, and synchronized access from the
+owning domain's Rayon workers while keeping security mechanisms outside the
+trusted initial runtime. All of this landed in one commit (`59d0ccd`).
 
 ## Context reviewed
 

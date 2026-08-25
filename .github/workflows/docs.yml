@@ -8,8 +8,11 @@ on:
       - "docs/**"
       - "scripts/build_docs_site.sh"
       - "scripts/check-doc-snippets.py"
+      - "scripts/check-tutorial-examples.sh"
       - ".github/workflows/docs.yml"
       - "src/**"
+      - "examples/**"
+      - "Cargo.toml"
   workflow_dispatch:
 
 permissions:
@@ -36,14 +39,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends libclang-dev libopenmpi-dev openmpi-bin
       - name: Install Quarto
         uses: quarto-dev/quarto-actions/setup@v2
-      - name: Run tutorial code
+      - name: Run tutorial examples
         env:
           HATAORI_MPIEXEC: mpiexec
           HATAORI_MPI_RANKS: "2"
-          HATAORI_TUTORIAL_TIMEOUT_SECS: "120"
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
-          docs/tutorial-code/scripts/check.sh
+          scripts/check-tutorial-examples.sh
       - name: Build docs site
         run: |
           export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"

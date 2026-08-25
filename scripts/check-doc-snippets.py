@@ -3,7 +3,7 @@
 
 A doc marks a block with
 
-    <!-- snippet-source: docs/tutorial-code/src/bin/serial_map.rs#serial-map -->
+    <!-- snippet-source: examples/serial_mandelbrot.rs#serial-map -->
     ```rust
     ...
     ```
@@ -14,7 +14,7 @@ and this script replaces the fenced block with the region between
 file when no `#NAME` is given). `--check` fails instead of rewriting, and also
 fails on any unmarked ```rust fence in docs/getting-started, docs/guides, and
 docs/tutorials so every published snippet is compiled and run by
-`cargo test -p hataori-tutorial-code`.
+`scripts/check-tutorial-examples.sh`.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ START_RE = re.compile(r"<!--\s*snippet-source:\s*([^>]+?)\s*-->")
 END_RE = re.compile(r"<!--\s*end-snippet-source\s*-->")
 REGION_RE = re.compile(r"^\s*//\s*snippet-(start|end):([A-Za-z0-9_-]+)\s*$")
 CHECKED_DIRS = ("getting-started", "guides", "tutorials")
-EXCLUDED_DIRS = {"design", "superpowers", "tutorial-code", "api"}
+EXCLUDED_DIRS = {"design", "superpowers", "worklogs", "api"}
 
 
 def source_regions(source: pathlib.Path) -> dict[str, str]:
