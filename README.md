@@ -2,6 +2,16 @@
 
 Hataori is a Rust engine for simple serial, Rayon, MPI, and hybrid data-parallel execution. It is inspired by Distributed.jl's dynamically scheduled `pmap` while retaining Rust's scoped execution and MPI's SPMD model.
 
+## Documentation
+
+The online documentation — execution-model guide, runnable tutorials for the
+serial, Rayon, MPI, hybrid, and runtime-loaded-MPI modes, and the API
+reference — is published from `docs/` at
+<https://shinaoka.github.io/hataori-rs/>. Build it locally with
+`scripts/build_docs_site.sh` (requires [Quarto](https://quarto.org)); the
+tutorial code lives in `docs/tutorial-code` and runs with
+`docs/tutorial-code/scripts/check.sh`.
+
 ## Name
 
 **Hataori** comes from the Japanese word **機織り** (*hataori*), meaning weaving on a loom. The name reflects the engine's job: weave independent strands of work across MPI ranks and Rayon threads into one ordered result.
