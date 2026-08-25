@@ -61,8 +61,29 @@ cmake -S MPIwrapper -B MPIwrapper/build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$PWD/mpiwrapper-install"
 cmake --build MPIwrapper/build --parallel
 cmake --install MPIwrapper/build
-# the library is $PWD/mpiwrapper-install/lib/libmpiwrapper.so (.dylib on macOS)
+# the library is $PWD/mpiwrapper-install/lib/libmpiwrapper.so (also on macOS)
 ```
+
+::: {.callout-note}
+## macOS with Homebrew Open MPI
+
+`mpifort --showme:link` on Homebrew Open MPI emits `-Wl,-flat_namespace`,
+which CMake's `FindMPI` copies into `MPI_Fortran_LINK_FLAGS`. MPIwrapper's
+own post-link check then fails with "does not use a two-level namespace"
+(a flat-namespace plugin would resolve `MPI_*` to itself and recurse).
+Override the flag when configuring:
+
+```bash
+brew install open-mpi cmake gcc   # gcc provides gfortran
+cmake -S MPIwrapper -B MPIwrapper/build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$PWD/mpiwrapper-install" \
+  -DMPI_Fortran_LINK_FLAGS="-Wl,-twolevel_namespace"
+```
+
+Passing an empty value does not work — `FindMPI` re-detects the flag — so
+the override must be non-empty. With this, every `rsmpi-rt` lane of
+`scripts/check-tutorial-examples.sh` passes on Apple Silicon.
+:::
 
 ## Build and run the tutorials
 
