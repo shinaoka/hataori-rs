@@ -20,6 +20,12 @@ Then read the Hataori-specific rules:
 
 - `REPOSITORY_RULES.md`
 
+For the user-facing documentation, start from `docs/llms.txt`: it states the
+calling conventions shared by every execution model and links each guide,
+tutorial, API page, and design document with a one-line description. Keep it
+in sync when adding, renaming, or removing pages under `docs/`;
+`scripts/check-llms-index.py` enforces that every entry resolves.
+
 The shared rules are not vendored here. This repository is expected to move to
 the tensor4all GitHub organization in the future, so cross-repository policy
 belongs in `tensor4all-agent-rules`; only Hataori-specific durable constraints

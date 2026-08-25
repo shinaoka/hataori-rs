@@ -30,6 +30,7 @@ collectives for owned values.
 | Link-time vs runtime-loaded MPI | [Choosing Features and Backends](guides/features-and-backends.md) |
 | Function-level documentation | [API Reference](api/index.md) |
 | Why the engine is shaped this way | [P0 design](design.md), [P1 bounded prefetch](design/bounded-prefetch.md) |
+| Feed the whole site to a coding agent | [llms.txt](llms.txt) — conventions plus every page with a one-line description |
 
 ## Thirty-second example
 

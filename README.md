@@ -12,6 +12,12 @@ reference — is published from `docs/` at
 tutorials quote the Mandelbrot examples under `examples/`, which run with
 `scripts/check-tutorial-examples.sh`.
 
+Coding agents and readers who want one machine-oriented entry point should
+start from the [llms.txt index](docs/llms.txt) (published at
+<https://shinaoka.github.io/hataori-rs/llms.txt>): it states the calling
+conventions every model shares and lists every guide, tutorial, API page, and
+design document with a one-line description, so each is one fetch away.
+
 ## Name
 
 **Hataori** comes from the Japanese word **機織り** (*hataori*), meaning weaving on a loom. The name reflects the engine's job: weave independent strands of work across MPI ranks and Rayon threads into one ordered result.
@@ -122,6 +128,19 @@ lane, MPI ones via `mpiexec -n 2`; needs Rust >= 1.96 for `tenferro`) with:
 ```bash
 scripts/check-tutorial-examples.sh                                   # link-time MPI lanes
 scripts/check-tutorial-examples.sh /abs/path/to/libmpiwrapper.so     # plus rsmpi-rt lanes
+```
+
+### Keep `docs/llms.txt` in sync
+
+`docs/llms.txt` is the machine-oriented index of the site. When a page is
+added, renamed, or removed under `docs/`, update its entry there;
+`scripts/check-llms-index.py` (run by `scripts/build_docs_site.sh` and CI)
+fails when an entry points at a page that no longer exists, when a page
+rendered by `docs/_quarto.yml` has no entry, when a URL is repeated, or when
+the README stops linking the index:
+
+```bash
+python3 scripts/check-llms-index.py
 ```
 
 ### Publishing
