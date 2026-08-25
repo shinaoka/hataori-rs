@@ -105,6 +105,19 @@ mpiexec -n 2 target/debug/hybrid_pmap
 On a laptop keep `ranks × workers` at or below the core count; the binary
 uses two workers per rank.
 
+::: {.callout-warning}
+## Launcher core binding vs. managed domains
+
+On Linux, `Domain::managed` pins each worker to a CPU from `cpu_set` and
+rejects CPUs outside the process's affinity mask
+(`DomainBuildError::CpuNotAllowed`). Open MPI binds each rank to a single
+core by default for small jobs, which makes a two-worker managed domain
+fail. Either launch with `mpiexec --bind-to none` (or `--map-by
+node:PE=<workers>` to give each rank a core set), or use `Domain::external`
+with a pool the application built itself. The tutorial tests pass
+`--oversubscribe --bind-to none` to Open MPI for this reason.
+:::
+
 Real workload: [`examples/mpi_mandelbrot_hybrid.rs`](https://github.com/shinaoka/hataori-rs/blob/main/examples/mpi_mandelbrot_hybrid.rs)
 takes `--workers N` and `--batch-factor N` and renders the same image as the
 Rayon-only and MPI-only examples.

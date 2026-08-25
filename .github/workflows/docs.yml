@@ -25,6 +25,7 @@ jobs:
   build:
     name: Build docs site
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -32,7 +33,7 @@ jobs:
       - name: Install Open MPI
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libopenmpi-dev openmpi-bin
+          sudo apt-get install -y --no-install-recommends libclang-dev libopenmpi-dev openmpi-bin
       - name: Install Quarto
         uses: quarto-dev/quarto-actions/setup@v2
       - name: Configure GitHub Pages
@@ -46,11 +47,14 @@ jobs:
         env:
           HATAORI_MPIEXEC: mpiexec
           HATAORI_MPI_RANKS: "2"
-          # Hosted runners have few cores; let 2 ranks x 2 workers oversubscribe.
-          OMPI_MCA_rmaps_base_oversubscribe: "1"
-        run: docs/tutorial-code/scripts/check.sh
+          HATAORI_TUTORIAL_TIMEOUT_SECS: "120"
+        run: |
+          export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
+          docs/tutorial-code/scripts/check.sh
       - name: Build docs site
-        run: scripts/build_docs_site.sh
+        run: |
+          export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"
+          scripts/build_docs_site.sh
       - name: Upload artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
