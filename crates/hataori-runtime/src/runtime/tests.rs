@@ -1,5 +1,7 @@
 use super::*;
-use crate::{ActionError, DistributedObject, ObjectReadAction, ObjectWriteAction, WireValue};
+use crate::{
+    ActionError, DistributedObject, ObjectReadAction, ObjectWriteAction, RestoreContext, WireValue,
+};
 use hataori_runtime_foundation::{
     memory::{MemoryFault, MemoryNetwork},
     protocol::ProtocolLimits,
@@ -80,6 +82,21 @@ impl Action for Fail {
     type Output = ();
 }
 
+struct Slow(u64);
+impl WireValue for Slow {
+    const SCHEMA_ID: u64 = 102;
+    fn encode(self) -> Result<Segments, ActionError> {
+        self.0.encode()
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        Ok(Self(u64::decode(segments)?))
+    }
+}
+impl Action for Slow {
+    const ID: u128 = 3;
+    type Output = ();
+}
+
 struct Counter(u64);
 impl WireValue for Counter {
     const SCHEMA_ID: u64 = 200;
@@ -92,6 +109,19 @@ impl WireValue for Counter {
 }
 impl DistributedObject for Counter {
     const TYPE_ID: u128 = 200;
+}
+impl MobileObject for Counter {
+    const MOBILITY: Mobility = Mobility::Migratable;
+    const SNAPSHOT_VERSION: u32 = 1;
+    type Snapshot = u64;
+
+    fn freeze(&mut self) -> Result<Self::Snapshot, ActionError> {
+        Ok(self.0)
+    }
+
+    fn restore(snapshot: Self::Snapshot, _: RestoreContext) -> Result<Self, ActionError> {
+        Ok(Self(snapshot))
+    }
 }
 
 struct Increment(u64);
@@ -225,6 +255,20 @@ impl DistributedObject for Blob {
     const TYPE_ID: u128 = 220;
 }
 
+impl MobileObject for Blob {
+    const MOBILITY: Mobility = Mobility::Migratable;
+    const SNAPSHOT_VERSION: u32 = 1;
+    type Snapshot = Vec<u8>;
+
+    fn freeze(&mut self) -> Result<Self::Snapshot, ActionError> {
+        Ok(self.0.clone())
+    }
+
+    fn restore(snapshot: Self::Snapshot, _: RestoreContext) -> Result<Self, ActionError> {
+        Ok(Self(snapshot))
+    }
+}
+
 struct BlobLen;
 impl WireValue for BlobLen {
     const SCHEMA_ID: u64 = 221;
@@ -244,6 +288,96 @@ impl ObjectReadAction<Blob> for BlobLen {
     type Output = u64;
     fn execute(self, state: &Blob) -> Result<u64, ActionError> {
         Ok(state.0.len() as u64)
+    }
+}
+
+struct DeclaredPinned;
+impl WireValue for DeclaredPinned {
+    const SCHEMA_ID: u64 = 229;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Ok(Vec::new())
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        if segments.is_empty() {
+            Ok(Self)
+        } else {
+            Err(ActionError::codec("declared pinned payload"))
+        }
+    }
+}
+impl DistributedObject for DeclaredPinned {
+    const TYPE_ID: u128 = 229;
+}
+impl MobileObject for DeclaredPinned {
+    const MOBILITY: Mobility = Mobility::Pinned;
+    const SNAPSHOT_VERSION: u32 = 1;
+    type Snapshot = ();
+    fn freeze(&mut self) -> Result<Self::Snapshot, ActionError> {
+        Ok(())
+    }
+    fn restore(_: Self::Snapshot, _: RestoreContext) -> Result<Self, ActionError> {
+        Ok(Self)
+    }
+}
+
+struct RefuseRestore {
+    logical: u64,
+    provider_locality: u64,
+}
+impl WireValue for RefuseRestore {
+    const SCHEMA_ID: u64 = 230;
+    fn encode(self) -> Result<Segments, ActionError> {
+        self.logical.encode()
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        Ok(Self {
+            logical: u64::decode(segments)?,
+            provider_locality: u64::MAX,
+        })
+    }
+}
+impl DistributedObject for RefuseRestore {
+    const TYPE_ID: u128 = 230;
+}
+impl MobileObject for RefuseRestore {
+    const MOBILITY: Mobility = Mobility::Reconstructible;
+    const SNAPSHOT_VERSION: u32 = 1;
+    type Snapshot = u64;
+
+    fn freeze(&mut self) -> Result<Self::Snapshot, ActionError> {
+        Ok(self.logical)
+    }
+
+    fn restore(snapshot: Self::Snapshot, context: RestoreContext) -> Result<Self, ActionError> {
+        if snapshot == 19 && context.destination().locality == LocalityId::new(1) {
+            return Err(ActionError::user("destination provider unavailable"));
+        }
+        Ok(Self {
+            logical: snapshot,
+            provider_locality: context.destination().locality.get(),
+        })
+    }
+}
+
+struct ReadRefuse;
+impl WireValue for ReadRefuse {
+    const SCHEMA_ID: u64 = 231;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Ok(Vec::new())
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        if segments.is_empty() {
+            Ok(Self)
+        } else {
+            Err(ActionError::codec("read refuse payload"))
+        }
+    }
+}
+impl ObjectReadAction<RefuseRestore> for ReadRefuse {
+    const ID: u128 = 231;
+    type Output = u64;
+    fn execute(self, state: &RefuseRestore) -> Result<u64, ActionError> {
+        Ok((state.logical << 8) | state.provider_locality)
     }
 }
 
@@ -281,7 +415,15 @@ fn builder_with_limits(
     builder
         .register::<Fail, _>(|_| Err(ActionError::user("expected failure")))
         .unwrap();
-    builder.register_object_read_write::<Counter>().unwrap();
+    builder
+        .register::<Slow, _>(|slow| {
+            std::thread::sleep(Duration::from_millis(slow.0));
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .register_mobile_object_read_write::<Counter>()
+        .unwrap();
     builder
         .register_object_read::<Counter, ReadCounter>()
         .unwrap();
@@ -298,8 +440,14 @@ fn builder_with_limits(
     builder
         .register_object_write::<LocalOnly, CheckDomain>()
         .unwrap();
-    builder.register_object_read_write::<Blob>().unwrap();
+    builder.register_mobile_object_read_write::<Blob>().unwrap();
     builder.register_object_read::<Blob, BlobLen>().unwrap();
+    builder
+        .register_mobile_object_read_write::<RefuseRestore>()
+        .unwrap();
+    builder
+        .register_object_read::<RefuseRestore, ReadRefuse>()
+        .unwrap();
     builder
 }
 
@@ -678,6 +826,388 @@ fn shutdown_atomically_rejects_concurrent_client_submission() {
 }
 
 #[test]
+fn explicit_migration_preserves_identity_state_and_epoch() {
+    let (mut left, mut right, _, _) = pair([]);
+    let client = left.client();
+    let remote = drive_future(
+        &mut left,
+        &mut right,
+        client
+            .create_at(
+                Place::new(LocalityId::new(0), DomainId::DEFAULT),
+                Counter(7),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let object = remote.object_id();
+    let from = remote.observed_location();
+    let transfer = drive_future(
+        &mut left,
+        &mut right,
+        remote.transfer_to(LocalityId::new(1)).unwrap(),
+    )
+    .unwrap();
+    let imported = right.client().import_transfer(transfer).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+        .unwrap();
+    let report = drive_future(&mut left, &mut right, migration).unwrap();
+    assert_eq!(report.object, object);
+    assert_eq!(report.from, from);
+    assert_eq!(report.to.locality(), LocalityId::new(1));
+    assert_eq!(report.to.epoch(), from.epoch() + 1);
+    assert_eq!(report.snapshot_bytes, 8);
+    assert_eq!(right.stats().objects.live_objects, 1);
+    right.clear_object_resolver();
+    let request_before = right.shared.next_request.load(Ordering::Relaxed);
+    let value = drive_future(
+        &mut left,
+        &mut right,
+        imported.call_write(Increment(5)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value, 12);
+    assert_eq!(
+        right.shared.next_request.load(Ordering::Relaxed),
+        request_before
+    );
+    let back = remote
+        .migrate_to(Place::new(LocalityId::new(0), DomainId::DEFAULT))
+        .unwrap();
+    let back = drive_future(&mut left, &mut right, back).unwrap();
+    assert_eq!(back.to.locality(), LocalityId::new(0));
+    assert_eq!(back.to.epoch(), report.to.epoch() + 1);
+    assert_eq!(left.stats().objects.forwarding_entries, 0);
+    let redirect_request = right.shared.next_request.load(Ordering::Relaxed);
+    assert_eq!(
+        drive_future(
+            &mut left,
+            &mut right,
+            imported.call_read(ReadCounter).unwrap(),
+        )
+        .unwrap(),
+        12
+    );
+    assert_eq!(
+        right.shared.next_request.load(Ordering::Relaxed),
+        redirect_request + 1
+    );
+    assert_eq!(left.stats().objects.completed_migrations, 2);
+    drop(imported);
+    drop(remote);
+    for _ in 0..16 {
+        let _ = left.progress(64);
+        let _ = right.progress(64);
+    }
+    assert_eq!(left.stats().objects.live_objects, 0);
+    assert_eq!(right.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn mobile_registration_rejects_declared_pinned_types() {
+    let mut builder = Runtime::builder(
+        RunId::new(77).unwrap(),
+        ProtocolLimits::default(),
+        RuntimeLimits::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        builder.register_mobile_object_exclusive::<DeclaredPinned>(),
+        Err(RuntimeError::PinnedObjectType(_))
+    ));
+}
+
+#[test]
+fn same_locality_migration_changes_domain_without_transporting_calls() {
+    let run_id = RunId::new(78).unwrap();
+    let mut transports = MemoryNetwork::build(1, run_id, ProtocolLimits::default(), [])
+        .unwrap()
+        .into_iter();
+    let (handle, driver) = transports.next().unwrap();
+    let mut builder = builder(run_id, Arc::new(AtomicUsize::new(0)));
+    builder.domain(DomainConfig::default()).unwrap();
+    builder
+        .domain(DomainConfig {
+            id: DomainId::new(1),
+            ..DomainConfig::default()
+        })
+        .unwrap();
+    builder.hello().unwrap();
+    let mut runtime = builder.start(handle, driver).unwrap();
+    let create = runtime
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            Counter(3),
+        )
+        .unwrap();
+    let remote = runtime.block_on(create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(0), DomainId::new(1)))
+        .unwrap();
+    let report = runtime.block_on(migration).unwrap();
+    assert_eq!(report.to.domain(), DomainId::new(1));
+    let call = remote.call_write(Increment(4)).unwrap();
+    assert_eq!(runtime.block_on(call).unwrap(), 7);
+    drop(remote);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn lost_precommit_snapshot_transfer_times_out_and_rolls_back() {
+    let (mut left, mut right, _, _) = pair([MemoryFault::Loss]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            Counter(8),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+        .unwrap();
+    assert!(matches!(
+        drive_future(&mut left, &mut right, migration),
+        Err(RuntimeError::Migration { message, .. }) if message.contains("DeadlineExceeded")
+    ));
+    let call = remote.call_write(Increment(1)).unwrap();
+    assert_eq!(drive_future(&mut left, &mut right, call).unwrap(), 9);
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn duplicated_migration_parcels_restore_and_execute_once() {
+    let (mut left, mut right, _, _) = pair(std::iter::repeat_n(MemoryFault::Duplicate, 24));
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            Counter(4),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+        .unwrap();
+    let report = drive_future(&mut left, &mut right, migration).unwrap();
+    assert_eq!(report.to.epoch(), 2);
+    let call = remote.call_write(Increment(1)).unwrap();
+    assert_eq!(drive_future(&mut left, &mut right, call).unwrap(), 5);
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn migration_waits_for_hard_colocation_ticket_release() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(1), DomainId::DEFAULT),
+            Counter(1),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let colocated = left.client().spawn_colocated(&remote, Slow(20)).unwrap();
+    for _ in 0..32 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+        if right.stats().objects.placement_tickets == 1 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(right.stats().objects.placement_tickets, 1);
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(0), DomainId::DEFAULT))
+        .unwrap();
+    for _ in 0..8 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(left.stats().objects.completed_migrations, 0);
+    drop(colocated);
+    let report = drive_future(&mut left, &mut right, migration).unwrap();
+    assert_eq!(report.to.locality(), LocalityId::new(0));
+    assert_eq!(right.stats().objects.placement_tickets, 0);
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn dropped_migration_expires_freeze_and_reopens_source_admission() {
+    let run_id = RunId::new(79).unwrap();
+    let mut transports = MemoryNetwork::build(1, run_id, ProtocolLimits::default(), [])
+        .unwrap()
+        .into_iter();
+    let (handle, driver) = transports.next().unwrap();
+    let mut builder = builder(run_id, Arc::new(AtomicUsize::new(0)));
+    builder
+        .object_limits(ObjectLimits {
+            forwarding_ttl: Duration::from_millis(2),
+            ..ObjectLimits::default()
+        })
+        .unwrap();
+    builder.domain(DomainConfig::default()).unwrap();
+    builder
+        .domain(DomainConfig {
+            id: DomainId::new(1),
+            ..DomainConfig::default()
+        })
+        .unwrap();
+    builder.hello().unwrap();
+    let mut runtime = builder.start(handle, driver).unwrap();
+    let create = runtime
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            Counter(11),
+        )
+        .unwrap();
+    let remote = runtime.block_on(create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(0), DomainId::new(1)))
+        .unwrap();
+    drop(migration);
+    for _ in 0..8 {
+        let _ = runtime.progress(64);
+    }
+    std::thread::sleep(Duration::from_millis(3));
+    for _ in 0..8 {
+        let _ = runtime.progress(64);
+    }
+    let call = remote.call_write(Increment(1)).unwrap();
+    assert_eq!(runtime.block_on(call).unwrap(), 12);
+    assert_eq!(runtime.stats().objects.active_migrations, 0);
+    drop(remote);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn migration_rolls_back_before_commit_when_restore_fails() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            RefuseRestore {
+                logical: 19,
+                provider_locality: 0,
+            },
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let error = drive_future(
+        &mut left,
+        &mut right,
+        remote
+            .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::Migration { message, .. } if message.contains("provider"))
+    );
+    assert_eq!(
+        drive_future(&mut left, &mut right, remote.call_read(ReadRefuse).unwrap(),).unwrap(),
+        19 << 8
+    );
+    assert_eq!(left.stats().objects.active_migrations, 0);
+    assert_eq!(left.stats().objects.rolled_back_migrations, 1);
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn migrated_object_root_preserves_remote_resident_until_release() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_rooted_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            Counter(6),
+        )
+        .unwrap();
+    let (remote, root) = drive_future(&mut left, &mut right, create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+        .unwrap();
+    drive_future(&mut left, &mut right, migration).unwrap();
+    drop(remote);
+    for _ in 0..8 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(left.stats().objects.roots, 1);
+    assert_eq!(right.stats().objects.live_objects, 1);
+    root.release();
+    for _ in 0..16 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(left.stats().objects.live_objects, 0);
+    assert_eq!(right.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn reconstructible_migration_rebuilds_destination_resources() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            RefuseRestore {
+                logical: 20,
+                provider_locality: 0,
+            },
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+        .unwrap();
+    drive_future(&mut left, &mut right, migration).unwrap();
+    assert_eq!(
+        drive_future(&mut left, &mut right, remote.call_read(ReadRefuse).unwrap()).unwrap(),
+        (20 << 8) | 1
+    );
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn segmented_megabyte_snapshot_migrates_without_state_in_object_calls() {
+    let (mut left, mut right, _, _) = pair([]);
+    let bytes = 1024 * 1024 + 17;
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            Blob(vec![7; bytes]),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let report = drive_future(
+        &mut left,
+        &mut right,
+        remote
+            .migrate_to(Place::new(LocalityId::new(1), DomainId::DEFAULT))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report.snapshot_bytes, bytes);
+    assert_eq!(
+        drive_future(&mut left, &mut right, remote.call_read(BlobLen).unwrap()).unwrap(),
+        bytes as u64
+    );
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
 fn fixed_remote_object_creation_calls_clone_lease_and_collection() {
     let (mut left, mut right, left_count, right_count) = pair([]);
     let client = left.client();
@@ -702,7 +1232,7 @@ fn fixed_remote_object_creation_calls_clone_lease_and_collection() {
     left.shared.objects.clear_resolver();
     assert!(matches!(
         drive_future(&mut left, &mut right, stale.call_read(ReadCounter).unwrap()),
-        Err(RuntimeError::RemoteObject { .. })
+        Err(RuntimeError::Protocol(message)) if message.contains("redirect")
     ));
     assert_eq!(left.state(), RuntimeState::Running);
     left.shared
@@ -730,7 +1260,7 @@ fn fixed_remote_object_creation_calls_clone_lease_and_collection() {
     let colocated = client
         .spawn_colocated(&remote, Add { left: 2, right: 5 })
         .unwrap();
-    assert_eq!(left.stats().objects.placement_tickets, 1);
+    assert_eq!(left.stats().objects.placement_tickets, 0);
     let preferred = client
         .spawn_preferred_colocated(&remote, PlacementFallback::Any, Add { left: 4, right: 5 })
         .unwrap();

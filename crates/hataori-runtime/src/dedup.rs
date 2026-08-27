@@ -80,7 +80,11 @@ impl DedupTable {
                 ));
             }
             return Ok(match state {
-                DedupState::Running { .. } => DedupDisposition::Running,
+                DedupState::Running { .. }
+                | DedupState::Completed {
+                    response: Some((RuntimeMessageKind::Moved, _)),
+                    ..
+                } => DedupDisposition::Running,
                 DedupState::Completed {
                     action,
                     domain,
@@ -135,6 +139,36 @@ impl DedupTable {
             },
         );
         Ok(DedupDisposition::New(cancelled))
+    }
+
+    pub(crate) fn release_redirect(
+        &mut self,
+        request: RequestId,
+        action: ActionId,
+        domain: DomainId,
+    ) -> Result<(), RuntimeError> {
+        match self.entries.get(&request) {
+            Some(DedupState::Completed {
+                action: stored_action,
+                domain: stored_domain,
+                response: Some((RuntimeMessageKind::Moved, _)),
+                ..
+            }) if *stored_action == action && *stored_domain == domain => {
+                self.entries.remove(&request);
+                Ok(())
+            }
+            Some(
+                DedupState::Running { .. }
+                | DedupState::Completed {
+                    response: Some((RuntimeMessageKind::Moved, _)),
+                    ..
+                },
+            ) => Ok(()),
+            Some(_) => Err(RuntimeError::Protocol(
+                "redirect changed request action or domain".into(),
+            )),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn cancel(

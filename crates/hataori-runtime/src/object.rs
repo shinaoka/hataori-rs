@@ -1,10 +1,10 @@
 use crate::{
-    action::{ActionRegistry, RegisteredAction, Segments},
+    action::{Action, ActionRegistry, RegisteredAction, Segments},
     domain::{ActionJob, ObjectJob},
     ActionError, Place, RemoteFuture, RuntimeClient, RuntimeError, SpawnOptions, WireValue,
 };
 use hataori_runtime_foundation::protocol::{
-    ActionId, DomainId, LocalityId, ObjectId, ObjectLocation, ObjectTypeId, RunId,
+    ActionId, DomainId, LocalityId, ObjectId, ObjectLocation, ObjectTypeId, RequestId, RunId,
 };
 use std::{
     any::Any,
@@ -26,6 +26,7 @@ const OBJECT_VERSION: u8 = 1;
 const OBJECT_HEADER_BYTES: usize = 76;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum ObjectConcurrency {
     Exclusive,
     ReadWrite,
@@ -48,11 +49,46 @@ pub trait ObjectWriteAction<T: DistributedObject>: WireValue {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum Mobility {
     Pinned,
+    Reconstructible,
+    Migratable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RestoreContext {
+    destination: Place,
+}
+
+impl RestoreContext {
+    pub const fn destination(self) -> Place {
+        self.destination
+    }
+}
+
+/// Logical object state that can be frozen and restored at another `Place`.
+pub trait MobileObject: DistributedObject {
+    const MOBILITY: Mobility;
+    const SNAPSHOT_VERSION: u32;
+    type Snapshot: WireValue;
+
+    /// Produces a versioned logical snapshot while runtime admission is closed.
+    ///
+    /// # Errors
+    /// Returns `ActionError` when logical state cannot be snapshotted.
+    fn freeze(&mut self) -> Result<Self::Snapshot, ActionError>;
+
+    /// Restores logical state and rebuilds destination-local resources.
+    ///
+    /// # Errors
+    /// Returns `ActionError` when the snapshot is invalid or a required
+    /// destination-local resource cannot be reconstructed.
+    fn restore(snapshot: Self::Snapshot, context: RestoreContext) -> Result<Self, ActionError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum ObjectAccess {
     Read,
     Write,
@@ -74,6 +110,13 @@ pub struct ObjectLimits {
     pub max_roots: usize,
     pub max_placement_tickets: usize,
     pub max_transfers: usize,
+    pub max_migrations: usize,
+    pub max_prepared_migrations: usize,
+    pub max_forwarders: usize,
+    pub max_redirects: usize,
+    pub max_snapshot_bytes: usize,
+    pub max_snapshot_segments: usize,
+    pub forwarding_ttl: Duration,
     pub lease_renew_interval: Duration,
     pub lease_ttl: Duration,
     pub lease_grace: Duration,
@@ -89,6 +132,13 @@ impl Default for ObjectLimits {
             max_roots: 1024,
             max_placement_tickets: 1024,
             max_transfers: 1024,
+            max_migrations: 64,
+            max_prepared_migrations: 64,
+            max_forwarders: 1024,
+            max_redirects: 8,
+            max_snapshot_bytes: 8 * 1024 * 1024 - MIGRATION_HEADER_BYTES,
+            max_snapshot_segments: 1023,
+            forwarding_ttl: Duration::from_secs(60),
             lease_renew_interval: Duration::from_secs(10),
             lease_ttl: Duration::from_secs(30),
             lease_grace: Duration::from_secs(30),
@@ -105,6 +155,13 @@ impl ObjectLimits {
             || self.max_roots == 0
             || self.max_placement_tickets == 0
             || self.max_transfers == 0
+            || self.max_migrations == 0
+            || self.max_prepared_migrations == 0
+            || self.max_forwarders == 0
+            || self.max_redirects == 0
+            || self.max_snapshot_bytes == 0
+            || self.max_snapshot_segments == 0
+            || self.forwarding_ttl.is_zero()
             || self.lease_renew_interval.is_zero()
             || self.lease_ttl <= self.lease_renew_interval
             || self.lease_grace.is_zero()
@@ -113,6 +170,14 @@ impl ObjectLimits {
         }
         Ok(self)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MigrationReport {
+    pub object: ObjectId,
+    pub from: ObjectLocation,
+    pub to: ObjectLocation,
+    pub snapshot_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -127,6 +192,14 @@ pub struct ObjectStats {
     pub resolver_entries: usize,
     pub resolver_bytes: usize,
     pub transfers: usize,
+    pub active_migrations: usize,
+    pub prepared_migrations: usize,
+    pub forwarding_entries: usize,
+    pub migration_snapshot_bytes: usize,
+    pub transferred_snapshot_bytes: u64,
+    pub completed_migrations: u64,
+    pub rolled_back_migrations: u64,
+    pub failed_migrations: u64,
     pub local_calls: u64,
     pub remote_calls: u64,
 }
@@ -210,9 +283,20 @@ impl ObjectEnvelope {
     }
 }
 
+mod migration;
+pub use migration::MigrationFuture;
+use migration::MIGRATION_SCHEMA_ID;
+pub(crate) use migration::{
+    MigrationPacket, MIGRATION_ACTIVATE_ACTION_ID, MIGRATION_COMMIT_ACTION_ID,
+    MIGRATION_FREEZE_ACTION_ID, MIGRATION_HEADER_BYTES, MIGRATION_PREPARE_ACTION_ID,
+    MIGRATION_RETIRE_ACTION_ID, MIGRATION_ROLLBACK_ACTION_ID,
+};
+
 type Decoder = dyn Fn(Segments) -> Result<ErasedState, ActionError> + Send + Sync;
 type LocalWrapper = dyn Fn(Box<dyn Any + Send>) -> Result<ErasedState, RuntimeError> + Send + Sync;
 type ObjectHandler = dyn Fn(&ObjectEntry, Segments) -> Result<Segments, ActionError> + Send + Sync;
+type Freezer = dyn Fn(&ErasedState) -> Result<Segments, ActionError> + Send + Sync;
+type Restorer = dyn Fn(Segments, RestoreContext) -> Result<ErasedState, ActionError> + Send + Sync;
 
 #[derive(Clone)]
 struct ObjectActionRegistration {
@@ -224,17 +308,39 @@ struct ObjectActionRegistration {
 }
 
 #[derive(Clone)]
+struct MigrationRegistration {
+    mobility: Mobility,
+    snapshot_version: u32,
+    snapshot_schema: u64,
+    freezer: Option<Arc<Freezer>>,
+    restorer: Option<Arc<Restorer>>,
+}
+
+#[derive(Clone)]
+struct PlacementActionRegistration {
+    input_schema: u64,
+    output_schema: u64,
+    handler: RegisteredAction,
+}
+
+#[derive(Clone)]
 struct ObjectTypeRegistration {
     schema: u64,
     concurrency: ObjectConcurrency,
+    mobility: Mobility,
+    snapshot_version: u32,
+    snapshot_schema: u64,
     decoder: Arc<Decoder>,
     local_wrapper: Arc<LocalWrapper>,
+    freezer: Option<Arc<Freezer>>,
+    restorer: Option<Arc<Restorer>>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct ObjectRegistry {
     types: BTreeMap<ObjectTypeId, ObjectTypeRegistration>,
     actions: BTreeMap<ActionId, ObjectActionRegistration>,
+    placements: BTreeMap<ActionId, PlacementActionRegistration>,
 }
 
 impl std::fmt::Debug for ObjectRegistry {
@@ -242,6 +348,7 @@ impl std::fmt::Debug for ObjectRegistry {
         f.debug_struct("ObjectRegistry")
             .field("types", &self.types.len())
             .field("actions", &self.actions.len())
+            .field("placements", &self.placements.len())
             .finish()
     }
 }
@@ -250,6 +357,13 @@ impl ObjectRegistry {
     pub(crate) fn register_exclusive<T: DistributedObject>(&mut self) -> Result<(), RuntimeError> {
         self.register_type::<T>(
             ObjectConcurrency::Exclusive,
+            MigrationRegistration {
+                mobility: Mobility::Pinned,
+                snapshot_version: 0,
+                snapshot_schema: 0,
+                freezer: None,
+                restorer: None,
+            },
             |segments| {
                 Ok(ErasedState::Exclusive(Mutex::new(Box::new(T::decode(
                     segments,
@@ -269,6 +383,97 @@ impl ObjectRegistry {
     ) -> Result<(), RuntimeError> {
         self.register_type::<T>(
             ObjectConcurrency::ReadWrite,
+            MigrationRegistration {
+                mobility: Mobility::Pinned,
+                snapshot_version: 0,
+                snapshot_schema: 0,
+                freezer: None,
+                restorer: None,
+            },
+            |segments| {
+                Ok(ErasedState::ReadWrite(RwLock::new(Box::new(T::decode(
+                    segments,
+                )?))))
+            },
+            |state| {
+                let state = state.downcast::<T>().map_err(|_| {
+                    RuntimeError::UnknownObjectType(ObjectTypeId::new(T::TYPE_ID).unwrap())
+                })?;
+                let state: Box<dyn Any + Send + Sync> = state;
+                Ok(ErasedState::ReadWrite(RwLock::new(state)))
+            },
+        )
+    }
+
+    pub(crate) fn register_mobile_exclusive<T: MobileObject>(
+        &mut self,
+    ) -> Result<(), RuntimeError> {
+        validate_mobile::<T>()?;
+        self.register_type::<T>(
+            ObjectConcurrency::Exclusive,
+            MigrationRegistration {
+                mobility: T::MOBILITY,
+                snapshot_version: T::SNAPSHOT_VERSION,
+                snapshot_schema: T::Snapshot::SCHEMA_ID,
+                freezer: Some(Arc::new(|state| {
+                    let ErasedState::Exclusive(state) = state else {
+                        return Err(ActionError::user("object concurrency mismatch"));
+                    };
+                    let mut state = state
+                        .try_lock()
+                        .map_err(|_| ActionError::user("object admission saturated"))?;
+                    let typed = state
+                        .downcast_mut::<T>()
+                        .ok_or_else(|| ActionError::user("object type mismatch"))?;
+                    typed.freeze()?.encode()
+                })),
+                restorer: Some(Arc::new(|segments, context| {
+                    let state = T::restore(T::Snapshot::decode(segments)?, context)?;
+                    Ok(ErasedState::Exclusive(Mutex::new(Box::new(state))))
+                })),
+            },
+            |segments| {
+                Ok(ErasedState::Exclusive(Mutex::new(Box::new(T::decode(
+                    segments,
+                )?))))
+            },
+            |state| {
+                let state = state.downcast::<T>().map_err(|_| {
+                    RuntimeError::UnknownObjectType(ObjectTypeId::new(T::TYPE_ID).unwrap())
+                })?;
+                Ok(ErasedState::Exclusive(Mutex::new(state)))
+            },
+        )
+    }
+
+    pub(crate) fn register_mobile_read_write<T: MobileObject + Sync>(
+        &mut self,
+    ) -> Result<(), RuntimeError> {
+        validate_mobile::<T>()?;
+        self.register_type::<T>(
+            ObjectConcurrency::ReadWrite,
+            MigrationRegistration {
+                mobility: T::MOBILITY,
+                snapshot_version: T::SNAPSHOT_VERSION,
+                snapshot_schema: T::Snapshot::SCHEMA_ID,
+                freezer: Some(Arc::new(|state| {
+                    let ErasedState::ReadWrite(state) = state else {
+                        return Err(ActionError::user("object concurrency mismatch"));
+                    };
+                    let mut state = state
+                        .try_write()
+                        .map_err(|_| ActionError::user("object admission saturated"))?;
+                    let typed = state
+                        .downcast_mut::<T>()
+                        .ok_or_else(|| ActionError::user("object type mismatch"))?;
+                    typed.freeze()?.encode()
+                })),
+                restorer: Some(Arc::new(|segments, context| {
+                    let state = T::restore(T::Snapshot::decode(segments)?, context)?;
+                    let state: Box<dyn Any + Send + Sync> = Box::new(state);
+                    Ok(ErasedState::ReadWrite(RwLock::new(state)))
+                })),
+            },
             |segments| {
                 Ok(ErasedState::ReadWrite(RwLock::new(Box::new(T::decode(
                     segments,
@@ -287,6 +492,7 @@ impl ObjectRegistry {
     fn register_type<T: DistributedObject>(
         &mut self,
         concurrency: ObjectConcurrency,
+        migration: MigrationRegistration,
         decoder: impl Fn(Segments) -> Result<ErasedState, ActionError> + Send + Sync + 'static,
         local_wrapper: impl Fn(Box<dyn Any + Send>) -> Result<ErasedState, RuntimeError>
             + Send
@@ -309,8 +515,13 @@ impl ObjectRegistry {
             ObjectTypeRegistration {
                 schema: T::SCHEMA_ID,
                 concurrency,
+                mobility: migration.mobility,
+                snapshot_version: migration.snapshot_version,
+                snapshot_schema: migration.snapshot_schema,
                 decoder: Arc::new(decoder),
                 local_wrapper: Arc::new(local_wrapper),
+                freezer: migration.freezer,
+                restorer: migration.restorer,
             },
         );
         Ok(())
@@ -330,7 +541,8 @@ impl ObjectRegistry {
             ObjectAccess::Read,
             |entry, input| {
                 let action = A::decode(input)?;
-                let ErasedState::ReadWrite(state) = &entry.state else {
+                let erased = entry.resident_state()?;
+                let ErasedState::ReadWrite(state) = &*erased else {
                     return Err(ActionError::user("object does not admit reads"));
                 };
                 let state = state
@@ -362,7 +574,8 @@ impl ObjectRegistry {
             ObjectAccess::Write,
             |entry, input| {
                 let action = A::decode(input)?;
-                match &entry.state {
+                let erased = entry.resident_state()?;
+                match &*erased {
                     ErasedState::Exclusive(state) => {
                         let mut state = state
                             .try_lock()
@@ -430,6 +643,26 @@ impl ObjectRegistry {
         Ok(())
     }
 
+    pub(crate) fn register_placement<A: Action>(
+        &mut self,
+        handler: RegisteredAction,
+    ) -> Result<ActionId, RuntimeError> {
+        let id =
+            placement_action_id(ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?)?;
+        if A::SCHEMA_ID == 0 || A::Output::SCHEMA_ID == 0 || self.reserves_action(id) {
+            return Err(RuntimeError::DuplicateAction(id));
+        }
+        self.placements.insert(
+            id,
+            PlacementActionRegistration {
+                input_schema: A::SCHEMA_ID,
+                output_schema: A::Output::SCHEMA_ID,
+                handler,
+            },
+        );
+        Ok(id)
+    }
+
     pub(crate) fn reserves_action(&self, id: ActionId) -> bool {
         matches!(
             id.get(),
@@ -438,7 +671,14 @@ impl ObjectRegistry {
                 | LEASE_ACQUIRE_ACTION_ID
                 | ROOT_RELEASE_ACTION_ID
                 | TRANSFER_ACK_ACTION_ID
+                | MIGRATION_FREEZE_ACTION_ID
+                | MIGRATION_PREPARE_ACTION_ID
+                | MIGRATION_COMMIT_ACTION_ID
+                | MIGRATION_ACTIVATE_ACTION_ID
+                | MIGRATION_ROLLBACK_ACTION_ID
+                | MIGRATION_RETIRE_ACTION_ID
         ) || self.actions.contains_key(&id)
+            || self.placements.contains_key(&id)
             || self
                 .types
                 .keys()
@@ -480,12 +720,57 @@ impl ObjectRegistry {
             1,
             service.transfer_ack_handler(),
         )?;
+        for (id, handler) in [
+            (
+                MIGRATION_FREEZE_ACTION_ID,
+                service.migration_freeze_handler(),
+            ),
+            (
+                MIGRATION_PREPARE_ACTION_ID,
+                service.migration_prepare_handler(),
+            ),
+            (
+                MIGRATION_COMMIT_ACTION_ID,
+                service.migration_commit_handler(),
+            ),
+            (
+                MIGRATION_ACTIVATE_ACTION_ID,
+                service.migration_activate_handler(),
+            ),
+            (
+                MIGRATION_ROLLBACK_ACTION_ID,
+                service.migration_rollback_handler(),
+            ),
+            (
+                MIGRATION_RETIRE_ACTION_ID,
+                service.migration_retire_handler(),
+            ),
+        ] {
+            actions.insert_erased(
+                ActionId::new(id).unwrap(),
+                MIGRATION_SCHEMA_ID,
+                MIGRATION_SCHEMA_ID,
+                handler,
+            )?;
+        }
         for (object_type, registration) in &self.types {
             actions.insert_erased(
                 create_action_id(*object_type)?,
                 registration.schema,
                 LOCATION_SCHEMA_ID,
                 service.create_handler(*object_type)?,
+            )?;
+        }
+        for (id, registration) in &self.placements {
+            let handler = registration.handler.clone();
+            actions.insert_erased(
+                *id,
+                registration.input_schema,
+                registration.output_schema,
+                RegisteredAction::new(move |segments| {
+                    let (_, payload) = ObjectEnvelope::decode(segments)?;
+                    handler.execute(payload)
+                }),
             )?;
         }
         for (id, registration) in &self.actions {
@@ -510,6 +795,14 @@ impl ObjectRegistry {
             hash_bytes(&mut hashes, &id.get().to_le_bytes());
             hash_bytes(&mut hashes, &registration.schema.to_le_bytes());
             hash_bytes(&mut hashes, &[registration.concurrency as u8]);
+            hash_bytes(&mut hashes, &[registration.mobility as u8]);
+            hash_bytes(&mut hashes, &registration.snapshot_version.to_le_bytes());
+            hash_bytes(&mut hashes, &registration.snapshot_schema.to_le_bytes());
+        }
+        for (id, registration) in &self.placements {
+            hash_bytes(&mut hashes, &id.get().to_le_bytes());
+            hash_bytes(&mut hashes, &registration.input_schema.to_le_bytes());
+            hash_bytes(&mut hashes, &registration.output_schema.to_le_bytes());
         }
         for (id, registration) in &self.actions {
             hash_bytes(&mut hashes, &id.get().to_le_bytes());
@@ -524,6 +817,24 @@ impl ObjectRegistry {
         }
         result
     }
+}
+
+fn validate_mobile<T: MobileObject>() -> Result<(), RuntimeError> {
+    if T::MOBILITY == Mobility::Pinned {
+        return Err(RuntimeError::PinnedObjectType(
+            ObjectTypeId::new(T::TYPE_ID).map_err(|_| RuntimeError::InvalidObjectTypeId)?,
+        ));
+    }
+    if T::SNAPSHOT_VERSION == 0 || T::Snapshot::SCHEMA_ID == 0 {
+        return Err(RuntimeError::InvalidSchema);
+    }
+    Ok(())
+}
+
+const PLACEMENT_ACTION_MASK: u128 = 0xc4ea_7e03_0000_0000_0000_0000_0000_0000;
+
+pub(crate) fn placement_action_id(action: ActionId) -> Result<ActionId, RuntimeError> {
+    ActionId::new(action.get() ^ PLACEMENT_ACTION_MASK).map_err(|_| RuntimeError::InvalidActionId)
 }
 
 const CREATE_ACTION_MASK: u128 = 0xc4ea_7e00_0000_0000_0000_0000_0000_0000;
@@ -575,15 +886,78 @@ struct Admission {
     queue: VecDeque<ActionJob>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MigrationOutcome {
+    Completed,
+    RolledBack,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectLifecycle {
+    Resident,
+    Freezing {
+        migration: RequestId,
+        expires_at: Instant,
+    },
+    Prepared {
+        migration: RequestId,
+        expires_at: Instant,
+    },
+    Forwarding {
+        location: ObjectLocation,
+        expires_at: Instant,
+    },
+    Retiring {
+        location: ObjectLocation,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Retirement {
+    pub(crate) object: ObjectId,
+    pub(crate) object_type: ObjectTypeId,
+    pub(crate) authority: LocalityId,
+    pub(crate) location: ObjectLocation,
+    pub(crate) snapshot_version: u32,
+    pub(crate) snapshot_schema: u64,
+}
+
+struct PreparedState {
+    migration: RequestId,
+    location: ObjectLocation,
+    state: Arc<ErasedState>,
+    snapshot_bytes: usize,
+    expires_at: Instant,
+}
+
 struct ObjectEntry {
     object_type: ObjectTypeId,
-    location: ObjectLocation,
-    state: ErasedState,
+    authority: LocalityId,
+    location: Mutex<ObjectLocation>,
+    state: Mutex<Option<Arc<ErasedState>>>,
+    lifecycle: Mutex<ObjectLifecycle>,
+    prepared: Mutex<Option<PreparedState>>,
+    snapshot_bytes: Mutex<usize>,
     leases: Mutex<HashMap<LocalityId, LeaseRecord>>,
     roots: Mutex<usize>,
     in_flight: Mutex<usize>,
     placement_tickets: Mutex<usize>,
     admission: Mutex<Admission>,
+}
+
+impl ObjectEntry {
+    fn location(&self) -> ObjectLocation {
+        *self.location.lock().unwrap()
+    }
+
+    fn resident_state(&self) -> Result<Arc<ErasedState>, ActionError> {
+        self.state
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| ActionError::user("object moved"))
+    }
 }
 
 pub(crate) struct ObjectService {
@@ -600,6 +974,13 @@ pub(crate) struct ObjectService {
     transfer_count: AtomicU64,
     placement_count: AtomicU64,
     pending_transfers: Mutex<HashSet<(ObjectId, LocalityId)>>,
+    active_migrations: Mutex<HashSet<RequestId>>,
+    prepared_count: AtomicU64,
+    completed_migrations: AtomicU64,
+    rolled_back_migrations: AtomicU64,
+    failed_migrations: AtomicU64,
+    migrated_bytes: AtomicU64,
+    retirements: Mutex<VecDeque<Retirement>>,
 }
 
 impl std::fmt::Debug for ObjectService {
@@ -633,25 +1014,14 @@ impl ObjectService {
             transfer_count: AtomicU64::new(0),
             placement_count: AtomicU64::new(0),
             pending_transfers: Mutex::new(HashSet::new()),
+            active_migrations: Mutex::new(HashSet::new()),
+            prepared_count: AtomicU64::new(0),
+            completed_migrations: AtomicU64::new(0),
+            rolled_back_migrations: AtomicU64::new(0),
+            failed_migrations: AtomicU64::new(0),
+            migrated_bytes: AtomicU64::new(0),
+            retirements: Mutex::new(VecDeque::new()),
         }
-    }
-
-    pub(crate) fn placement_ticket(
-        self: &Arc<Self>,
-        lease: Arc<LocalLease>,
-    ) -> Result<PlacementTicket, RuntimeError> {
-        self.placement_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < self.limits.max_placement_tickets as u64).then_some(count + 1)
-            })
-            .map_err(|_| RuntimeError::ResourceExhausted {
-                resource: crate::ResourceKind::PlacementTickets,
-                limit: self.limits.max_placement_tickets,
-            })?;
-        Ok(PlacementTicket {
-            service: Arc::clone(self),
-            _lease: lease,
-        })
     }
 
     pub(crate) fn create_local<T: DistributedObject>(
@@ -766,42 +1136,151 @@ impl ObjectService {
         })
     }
 
+    pub(crate) fn is_local_resident(&self, object: ObjectId, location: ObjectLocation) -> bool {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&object)
+            .is_some_and(|entry| {
+                let lifecycle = entry.lifecycle.lock().unwrap();
+                matches!(*lifecycle, ObjectLifecycle::Resident)
+                    && entry.location() == location
+                    && entry.state.lock().unwrap().is_some()
+            })
+    }
+
+    pub(crate) fn request_targets_current(&self, action: ActionId, payload: &Segments) -> bool {
+        if !self.registry.actions.contains_key(&action)
+            && !self.registry.placements.contains_key(&action)
+        {
+            return false;
+        }
+        let Ok(envelope) = ObjectEnvelope::inspect(payload) else {
+            return false;
+        };
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&envelope.object)
+            .is_some_and(|entry| {
+                entry.location().epoch() == envelope.epoch
+                    && matches!(*entry.lifecycle.lock().unwrap(), ObjectLifecycle::Resident)
+            })
+    }
+
     pub(crate) fn admit(
         &self,
         action: ActionId,
         mut job: ActionJob,
         domain_available: bool,
     ) -> Result<Option<ActionJob>, RuntimeError> {
-        let Some(registration) = self.registry.actions.get(&action) else {
+        let registration = self.registry.actions.get(&action);
+        let placement = self.registry.placements.contains_key(&action);
+        let freeze = action.get() == MIGRATION_FREEZE_ACTION_ID;
+        if registration.is_none() && !placement && !freeze {
             return Ok(Some(job));
+        }
+        let (object, object_type, epoch, migration) = if freeze {
+            let packet = MigrationPacket::decode(job.input.clone())
+                .map_err(|error| RuntimeError::Protocol(error.message()))?;
+            (
+                packet.object,
+                packet.object_type,
+                packet.from.epoch(),
+                Some(packet.migration),
+            )
+        } else {
+            let envelope = ObjectEnvelope::inspect(&job.input)
+                .map_err(|error| RuntimeError::Protocol(error.message()))?;
+            (envelope.object, envelope.object_type, envelope.epoch, None)
         };
-        let envelope = ObjectEnvelope::inspect(&job.input)
-            .map_err(|error| RuntimeError::Protocol(error.message()))?;
         let entry = self
             .entries
             .lock()
             .unwrap()
-            .get(&envelope.object)
+            .get(&object)
             .cloned()
-            .ok_or(RuntimeError::ObjectCollected(envelope.object))?;
-        if entry.object_type != envelope.object_type {
-            return Err(RuntimeError::UnknownObjectType(envelope.object_type));
+            .ok_or(RuntimeError::ObjectCollected(object))?;
+        if entry.object_type != object_type {
+            return Err(RuntimeError::UnknownObjectType(object_type));
         }
-        if entry.location.epoch() != envelope.epoch {
-            return Err(RuntimeError::StaleObjectLocation(envelope.object));
+        let location = entry.location();
+        if location.epoch() != epoch {
+            return Err(RuntimeError::Moved { object, location });
         }
-        let read = registration.access == ObjectAccess::Read;
+        {
+            let mut lifecycle = entry.lifecycle.lock().unwrap();
+            if let Some(migration) = migration {
+                match *lifecycle {
+                    ObjectLifecycle::Resident => {
+                        *lifecycle = ObjectLifecycle::Freezing {
+                            migration,
+                            expires_at: Instant::now() + self.limits.forwarding_ttl,
+                        };
+                    }
+                    ObjectLifecycle::Freezing {
+                        migration: existing,
+                        ..
+                    } if existing == migration => {}
+                    _ => return Err(RuntimeError::MigrationInProgress(object)),
+                }
+            } else {
+                match *lifecycle {
+                    ObjectLifecycle::Resident => {}
+                    ObjectLifecycle::Forwarding { location, .. }
+                    | ObjectLifecycle::Retiring { location } => {
+                        return Err(RuntimeError::Moved { object, location });
+                    }
+                    ObjectLifecycle::Freezing { .. } | ObjectLifecycle::Prepared { .. } => {
+                        return Err(RuntimeError::MigrationInProgress(object));
+                    }
+                }
+            }
+        }
+        if placement {
+            if !domain_available {
+                return Err(RuntimeError::Placement {
+                    request: job.request,
+                    message: "colocated domain is saturated".into(),
+                });
+            }
+            let lifecycle = entry.lifecycle.lock().unwrap();
+            if !matches!(*lifecycle, ObjectLifecycle::Resident) {
+                return Err(RuntimeError::MigrationInProgress(object));
+            }
+            self.placement_count
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    (count < self.limits.max_placement_tickets as u64).then_some(count + 1)
+                })
+                .map_err(|_| RuntimeError::ResourceExhausted {
+                    resource: crate::ResourceKind::PlacementTickets,
+                    limit: self.limits.max_placement_tickets,
+                })?;
+            *entry.placement_tickets.lock().unwrap() += 1;
+            *entry.in_flight.lock().unwrap() += 1;
+            drop(lifecycle);
+            job.object = Some(ObjectJob {
+                object,
+                read: false,
+                placement: true,
+            });
+            return Ok(Some(job));
+        }
+        let read =
+            registration.is_some_and(|registration| registration.access == ObjectAccess::Read);
         let mut admission = entry.admission.lock().unwrap();
         let available = domain_available
             && admission.queue.is_empty()
+            && (!freeze || *entry.placement_tickets.lock().unwrap() == 0)
             && if read {
                 !admission.writer
             } else {
                 !admission.writer && admission.readers == 0
             };
         job.object = Some(ObjectJob {
-            object: envelope.object,
+            object,
             read,
+            placement: false,
         });
         if available {
             if read {
@@ -827,7 +1306,11 @@ impl ObjectService {
             return Vec::new();
         };
         let mut admission = entry.admission.lock().unwrap();
-        if completed.read {
+        if completed.placement {
+            let mut tickets = entry.placement_tickets.lock().unwrap();
+            *tickets = tickets.saturating_sub(1);
+            self.placement_count.fetch_sub(1, Ordering::AcqRel);
+        } else if completed.read {
             admission.readers = admission.readers.saturating_sub(1);
         } else {
             admission.writer = false;
@@ -863,7 +1346,10 @@ impl ObjectService {
                 let Some(front) = admission.queue.front() else {
                     break;
                 };
-                if !domain_available(front.domain) {
+                if !domain_available(front.domain)
+                    || (front.action_id.get() == MIGRATION_FREEZE_ACTION_ID
+                        && *entry.placement_tickets.lock().unwrap() != 0)
+                {
                     break;
                 }
                 let object = front
@@ -890,7 +1376,19 @@ impl ObjectService {
         object: ObjectId,
         read: bool,
     ) -> Result<LocalAdmissionPin<'a>, RuntimeError> {
+        let lifecycle = entry.lifecycle.lock().unwrap();
+        match *lifecycle {
+            ObjectLifecycle::Resident => {}
+            ObjectLifecycle::Forwarding { location, .. }
+            | ObjectLifecycle::Retiring { location } => {
+                return Err(RuntimeError::Moved { object, location });
+            }
+            ObjectLifecycle::Freezing { .. } | ObjectLifecycle::Prepared { .. } => {
+                return Err(RuntimeError::MigrationInProgress(object));
+            }
+        }
         let mut admission = entry.admission.lock().unwrap();
+        drop(lifecycle);
         let available = admission.queue.is_empty()
             && if read {
                 !admission.writer
@@ -911,7 +1409,11 @@ impl ObjectService {
         *entry.in_flight.lock().unwrap() += 1;
         Ok(LocalAdmissionPin {
             service: self,
-            job: ObjectJob { object, read },
+            job: ObjectJob {
+                object,
+                read,
+                placement: false,
+            },
         })
     }
 
@@ -928,7 +1430,10 @@ impl ObjectService {
     {
         let entry = self.local_entry(object, object_type, location)?;
         let _pin = self.admit_local(&entry, object, true)?;
-        let ErasedState::ReadWrite(state) = &entry.state else {
+        let erased = entry
+            .resident_state()
+            .map_err(|error| RuntimeError::ObjectAction(error.message()))?;
+        let ErasedState::ReadWrite(state) = &*erased else {
             return Err(RuntimeError::InvalidObjectConcurrency);
         };
         let state = state
@@ -960,7 +1465,10 @@ impl ObjectService {
     {
         let entry = self.local_entry(object, object_type, location)?;
         let _pin = self.admit_local(&entry, object, false)?;
-        let output = match &entry.state {
+        let erased = entry
+            .resident_state()
+            .map_err(|error| RuntimeError::ObjectAction(error.message()))?;
+        let output = match &*erased {
             ErasedState::Exclusive(state) => {
                 let mut state = state
                     .try_lock()
@@ -1009,7 +1517,7 @@ impl ObjectService {
         if entry.object_type != object_type {
             return Err(RuntimeError::UnknownObjectType(object_type));
         }
-        if entry.location.epoch() != location.epoch() {
+        if entry.location().epoch() != location.epoch() {
             return Err(RuntimeError::StaleObjectLocation(object));
         }
         Ok(entry)
@@ -1039,7 +1547,8 @@ impl ObjectService {
                 .get(&envelope.object)
                 .cloned()
                 .ok_or_else(|| ActionError::user("object collected"))?;
-            if entry.object_type != envelope.object_type || entry.location.epoch() != envelope.epoch
+            if entry.object_type != envelope.object_type
+                || entry.location().epoch() != envelope.epoch
             {
                 return Err(ActionError::user("stale object location"));
             }
@@ -1091,8 +1600,12 @@ impl ObjectService {
             object,
             Arc::new(ObjectEntry {
                 object_type,
-                location,
-                state,
+                authority: self.local_id,
+                location: Mutex::new(location),
+                state: Mutex::new(Some(Arc::new(state))),
+                lifecycle: Mutex::new(ObjectLifecycle::Resident),
+                prepared: Mutex::new(None),
+                snapshot_bytes: Mutex::new(0),
                 leases: Mutex::new(leases),
                 roots: Mutex::new(usize::from(envelope.rooted)),
                 in_flight: Mutex::new(0),
@@ -1123,7 +1636,19 @@ impl ObjectService {
     }
 
     pub(crate) fn resolve(&self, object: ObjectId) -> Option<ObjectLocation> {
-        self.resolver.lock().unwrap().0.get(&object).copied()
+        self.resolver
+            .lock()
+            .unwrap()
+            .0
+            .get(&object)
+            .copied()
+            .or_else(|| {
+                self.entries
+                    .lock()
+                    .unwrap()
+                    .get(&object)
+                    .map(|entry| entry.location())
+            })
     }
 
     pub(crate) fn clear_all(&self) {
@@ -1132,6 +1657,9 @@ impl ObjectService {
         self.transfer_count.store(0, Ordering::Release);
         self.placement_count.store(0, Ordering::Release);
         self.pending_transfers.lock().unwrap().clear();
+        self.active_migrations.lock().unwrap().clear();
+        self.prepared_count.store(0, Ordering::Release);
+        self.retirements.lock().unwrap().clear();
         self.clear_resolver();
     }
 
@@ -1258,6 +1786,39 @@ impl ObjectService {
             let Some(entry) = self.entries.lock().unwrap().get(&id).cloned() else {
                 continue;
             };
+            {
+                let mut lifecycle = entry.lifecycle.lock().unwrap();
+                match *lifecycle {
+                    ObjectLifecycle::Freezing { expires_at, .. } if expires_at <= now => {
+                        *lifecycle = ObjectLifecycle::Resident;
+                        *entry.snapshot_bytes.lock().unwrap() = 0;
+                    }
+                    ObjectLifecycle::Prepared { expires_at, .. } if expires_at <= now => {
+                        if entry.prepared.lock().unwrap().take().is_some() {
+                            self.prepared_count.fetch_sub(1, Ordering::AcqRel);
+                        }
+                        *lifecycle = ObjectLifecycle::Forwarding {
+                            location: entry.location(),
+                            expires_at: now + self.limits.forwarding_ttl,
+                        };
+                    }
+                    ObjectLifecycle::Forwarding { expires_at, .. }
+                        if expires_at <= now && entry.authority != self.local_id =>
+                    {
+                        *entry.state.lock().unwrap() = None;
+                    }
+                    _ => {}
+                }
+                let expired_prepared = entry
+                    .prepared
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.expires_at <= now);
+                if expired_prepared && entry.prepared.lock().unwrap().take().is_some() {
+                    self.prepared_count.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
             let mut leases = entry.leases.lock().unwrap();
             for lease in leases.values_mut() {
                 if lease.expires_at <= now && lease.suspect_since.is_none() {
@@ -1285,17 +1846,78 @@ impl ObjectService {
     }
 
     fn collect(&self, object: ObjectId, _now: Instant) {
-        let mut entries = self.entries.lock().unwrap();
-        let collectible = entries.get(&object).is_some_and(|entry| {
-            entry.leases.lock().unwrap().is_empty()
-                && *entry.roots.lock().unwrap() == 0
-                && *entry.in_flight.lock().unwrap() == 0
-                && *entry.placement_tickets.lock().unwrap() == 0
-        });
-        if collectible {
-            entries.remove(&object);
-            self.resolver.lock().unwrap().0.remove(&object);
+        let Some(entry) = self.entries.lock().unwrap().get(&object).cloned() else {
+            return;
+        };
+        let idle = *entry.in_flight.lock().unwrap() == 0
+            && *entry.placement_tickets.lock().unwrap() == 0
+            && entry.admission.lock().unwrap().queue.is_empty()
+            && entry.prepared.lock().unwrap().is_none();
+        if !idle {
+            return;
         }
+        if entry.authority != self.local_id {
+            let lifecycle = entry.lifecycle.lock().unwrap();
+            if matches!(
+                *lifecycle,
+                ObjectLifecycle::Forwarding { .. } | ObjectLifecycle::Retiring { .. }
+            ) && entry.state.lock().unwrap().is_none()
+            {
+                drop(lifecycle);
+                self.entries.lock().unwrap().remove(&object);
+                self.resolver.lock().unwrap().0.remove(&object);
+            }
+            return;
+        }
+        if !entry.leases.lock().unwrap().is_empty() || *entry.roots.lock().unwrap() != 0 {
+            return;
+        }
+        let lifecycle = *entry.lifecycle.lock().unwrap();
+        match lifecycle {
+            ObjectLifecycle::Resident if entry.state.lock().unwrap().is_some() => {
+                self.entries.lock().unwrap().remove(&object);
+                self.resolver.lock().unwrap().0.remove(&object);
+            }
+            ObjectLifecycle::Forwarding { location, .. }
+                if entry.state.lock().unwrap().is_none() =>
+            {
+                if location.locality() == self.local_id {
+                    self.entries.lock().unwrap().remove(&object);
+                    self.resolver.lock().unwrap().0.remove(&object);
+                    return;
+                }
+                let registration = self.registry.types.get(&entry.object_type).unwrap();
+                let mut retirements = self.retirements.lock().unwrap();
+                if retirements.len() >= self.limits.max_migrations {
+                    return;
+                }
+                *entry.lifecycle.lock().unwrap() = ObjectLifecycle::Retiring { location };
+                retirements.push_back(Retirement {
+                    object,
+                    object_type: entry.object_type,
+                    authority: entry.authority,
+                    location,
+                    snapshot_version: registration.snapshot_version,
+                    snapshot_schema: registration.snapshot_schema,
+                });
+            }
+            ObjectLifecycle::Retiring { .. } => {}
+            _ => {}
+        }
+    }
+
+    pub(crate) fn take_retirements(&self, max: usize) -> Vec<Retirement> {
+        let mut queue = self.retirements.lock().unwrap();
+        (0..max).filter_map(|_| queue.pop_front()).collect()
+    }
+
+    pub(crate) fn requeue_retirement(&self, retirement: Retirement) {
+        self.retirements.lock().unwrap().push_front(retirement);
+    }
+
+    pub(crate) fn finish_retirement(&self, object: ObjectId) {
+        self.entries.lock().unwrap().remove(&object);
+        self.resolver.lock().unwrap().0.remove(&object);
     }
 
     pub(crate) fn stats(&self, now: Instant) -> ObjectStats {
@@ -1310,6 +1932,12 @@ impl ObjectService {
             remote_calls: self.remote_calls.load(Ordering::Relaxed),
             transfers: self.transfer_count.load(Ordering::Relaxed) as usize,
             placement_tickets: self.placement_count.load(Ordering::Relaxed) as usize,
+            active_migrations: self.active_migrations.lock().unwrap().len(),
+            prepared_migrations: self.prepared_count.load(Ordering::Relaxed) as usize,
+            completed_migrations: self.completed_migrations.load(Ordering::Relaxed),
+            rolled_back_migrations: self.rolled_back_migrations.load(Ordering::Relaxed),
+            failed_migrations: self.failed_migrations.load(Ordering::Relaxed),
+            transferred_snapshot_bytes: self.migrated_bytes.load(Ordering::Relaxed),
             ..ObjectStats::default()
         };
         for entry in entries.values() {
@@ -1322,13 +1950,21 @@ impl ObjectService {
             stats.roots += *entry.roots.lock().unwrap();
             stats.in_flight_calls += *entry.in_flight.lock().unwrap();
             stats.queued_calls += entry.admission.lock().unwrap().queue.len();
-            stats.placement_tickets += *entry.placement_tickets.lock().unwrap();
+            stats.migration_snapshot_bytes = stats
+                .migration_snapshot_bytes
+                .saturating_add(*entry.snapshot_bytes.lock().unwrap());
+            if matches!(
+                *entry.lifecycle.lock().unwrap(),
+                ObjectLifecycle::Forwarding { .. } | ObjectLifecycle::Retiring { .. }
+            ) {
+                stats.forwarding_entries += 1;
+            }
         }
         stats
     }
 }
 
-fn decode_location(bytes: Vec<u8>) -> Result<ObjectLocation, RuntimeError> {
+pub(crate) fn decode_location(bytes: Vec<u8>) -> Result<ObjectLocation, RuntimeError> {
     if bytes.len() != 32 {
         return Err(RuntimeError::Protocol(
             "invalid object location payload".into(),
@@ -1347,7 +1983,7 @@ fn decode_location(bytes: Vec<u8>) -> Result<ObjectLocation, RuntimeError> {
 pub(crate) struct LocalLease {
     object: ObjectId,
     object_type: ObjectTypeId,
-    location: ObjectLocation,
+    pub(crate) location: ObjectLocation,
     client: RuntimeClient,
     active: AtomicBool,
     next_renewal: Mutex<Instant>,
@@ -1482,28 +2118,17 @@ impl LocalLeaseManager {
     }
 }
 
-pub(crate) struct PlacementTicket {
-    service: Arc<ObjectService>,
+#[must_use = "a colocated future must be driven or dropped"]
+pub struct ColocatedFuture<T: WireValue> {
+    inner: RemoteObjectCall<T>,
     _lease: Arc<LocalLease>,
 }
 
-impl Drop for PlacementTicket {
-    fn drop(&mut self) {
-        self.service.placement_count.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-#[must_use = "a colocated future must be driven or dropped"]
-pub struct ColocatedFuture<T: WireValue> {
-    inner: RemoteFuture<T>,
-    ticket: Option<PlacementTicket>,
-}
-
 impl<T: WireValue> ColocatedFuture<T> {
-    pub(crate) fn new(inner: RemoteFuture<T>, ticket: PlacementTicket) -> Self {
+    pub(crate) fn new(inner: RemoteObjectCall<T>, lease: Arc<LocalLease>) -> Self {
         Self {
             inner,
-            ticket: Some(ticket),
+            _lease: lease,
         }
     }
 }
@@ -1512,11 +2137,7 @@ impl<T: WireValue> Future for ColocatedFuture<T> {
     type Output = Result<T, RuntimeError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let result = Pin::new(&mut self.inner).poll(context);
-        if result.is_ready() {
-            self.ticket.take();
-        }
-        result
+        Pin::new(&mut self.inner).poll(context)
     }
 }
 
@@ -1539,23 +2160,6 @@ pub struct PlacementFuture<T: WireValue> {
 }
 
 impl<T: WireValue> PlacementFuture<T> {
-    pub(crate) fn fallback(
-        future: RemoteFuture<T>,
-        fallback: PlacementFallback,
-        client: RuntimeClient,
-        action: ActionId,
-        options: SpawnOptions,
-    ) -> Self {
-        Self {
-            state: PlacementState::Fallback(future),
-            fallback,
-            client,
-            action,
-            payload: None,
-            options,
-        }
-    }
-
     pub(crate) fn new(
         preferred: ColocatedFuture<T>,
         fallback: PlacementFallback,
@@ -1639,15 +2243,136 @@ fn placement_saturated(error: &RuntimeError) -> bool {
     ) || matches!(error, RuntimeError::RemoteAction { message, .. }
             if message.contains("ResourceExhausted")
                 || message.contains("saturated")
-                || message.contains("queue"))
+                || message.contains("queue")
+                || message.contains("MigrationInProgress")
+                || message.contains("migration"))
 }
 
 impl<T: WireValue> Unpin for PlacementFuture<T> {}
 
-#[must_use = "an object call future must be driven or dropped"]
-pub enum ObjectCallFuture<T: WireValue> {
+pub(crate) struct RemoteCallSpec {
+    pub(crate) object: ObjectId,
+    pub(crate) object_type: ObjectTypeId,
+    pub(crate) action: ActionId,
+    pub(crate) payload: Segments,
+    pub(crate) last_epoch: u64,
+    pub(crate) max_redirects: usize,
+    pub(crate) deadline: Duration,
+}
+
+pub(crate) struct RemoteObjectCall<T: WireValue> {
+    future: RemoteFuture<T>,
+    client: RuntimeClient,
+    object: ObjectId,
+    object_type: ObjectTypeId,
+    action: ActionId,
+    payload: Segments,
+    request: RequestId,
+    last_epoch: u64,
+    redirects: usize,
+    max_redirects: usize,
+    deadline: Duration,
+}
+
+impl<T: WireValue> RemoteObjectCall<T> {
+    pub(crate) fn new(
+        future: RemoteFuture<T>,
+        client: RuntimeClient,
+        spec: RemoteCallSpec,
+    ) -> Self {
+        let request = future.request_id();
+        Self {
+            future,
+            client,
+            object: spec.object,
+            object_type: spec.object_type,
+            action: spec.action,
+            payload: spec.payload,
+            request,
+            last_epoch: spec.last_epoch,
+            redirects: 0,
+            max_redirects: spec.max_redirects,
+            deadline: spec.deadline,
+        }
+    }
+}
+
+impl<T: WireValue> Future for RemoteObjectCall<T> {
+    type Output = Result<T, RuntimeError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match Pin::new(&mut self.future).poll(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(RuntimeError::Moved { object, location })) => {
+                    if object != self.object || location.epoch() <= self.last_epoch {
+                        return Poll::Ready(Err(RuntimeError::Protocol(format!(
+                            "invalid object redirect: expected {:?} after epoch {}, got {:?} at epoch {}",
+                            self.object,
+                            self.last_epoch,
+                            object,
+                            location.epoch()
+                        ))));
+                    }
+                    if self.redirects >= self.max_redirects {
+                        return Poll::Ready(Err(RuntimeError::RedirectLimit(self.object)));
+                    }
+                    self.redirects += 1;
+                    self.last_epoch = location.epoch();
+                    self.client.cache_object_location(self.object, location);
+                    let payload = ObjectEnvelope {
+                        object: self.object,
+                        object_type: self.object_type,
+                        epoch: location.epoch(),
+                        lease_locality: self.client.local_id(),
+                        domain: location.domain(),
+                        rooted: false,
+                    }
+                    .encode(self.payload.clone());
+                    match self.client.spawn_encoded_retry(
+                        Place::new(location.locality(), location.domain()),
+                        self.action,
+                        payload,
+                        SpawnOptions {
+                            deadline: self.deadline,
+                            trace_id: None,
+                        },
+                        self.request,
+                    ) {
+                        Ok(future) => self.future = future,
+                        Err(error) => return Poll::Ready(Err(error)),
+                    }
+                }
+                Poll::Ready(result) => return Poll::Ready(result),
+            }
+        }
+    }
+}
+
+impl<T: WireValue> Unpin for RemoteObjectCall<T> {}
+
+enum ObjectCallState<T: WireValue> {
     Local(Option<Result<T, RuntimeError>>),
-    Remote(RemoteFuture<T>),
+    Remote(RemoteObjectCall<T>),
+}
+
+#[must_use = "an object call future must be driven or dropped"]
+pub struct ObjectCallFuture<T: WireValue> {
+    state: ObjectCallState<T>,
+}
+
+impl<T: WireValue> ObjectCallFuture<T> {
+    pub(crate) fn local(result: Result<T, RuntimeError>) -> Self {
+        Self {
+            state: ObjectCallState::Local(Some(result)),
+        }
+    }
+
+    pub(crate) fn remote(future: RemoteObjectCall<T>) -> Self {
+        Self {
+            state: ObjectCallState::Remote(future),
+        }
+    }
 }
 
 impl<T: WireValue> std::fmt::Debug for ObjectCallFuture<T> {
@@ -1660,13 +2385,13 @@ impl<T: WireValue> Future for ObjectCallFuture<T> {
     type Output = Result<T, RuntimeError>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut *self {
-            Self::Local(result) => Poll::Ready(result.take().unwrap_or_else(|| {
+        match &mut self.state {
+            ObjectCallState::Local(result) => Poll::Ready(result.take().unwrap_or_else(|| {
                 Err(RuntimeError::Protocol(
                     "object future polled after completion".into(),
                 ))
             })),
-            Self::Remote(future) => Pin::new(future).poll(context),
+            ObjectCallState::Remote(future) => Pin::new(future).poll(context),
         }
     }
 }
@@ -1892,7 +2617,7 @@ impl<T: DistributedObject> Future for TransferFuture<T> {
 
 impl<T: DistributedObject> Unpin for TransferFuture<T> {}
 
-fn encode_location(location: ObjectLocation) -> Result<Segments, ActionError> {
+pub(crate) fn encode_location(location: ObjectLocation) -> Result<Segments, ActionError> {
     let mut bytes = Vec::with_capacity(32);
     bytes.extend_from_slice(&location.locality().get().to_le_bytes());
     bytes.extend_from_slice(&location.domain().get().to_le_bytes());
@@ -1938,8 +2663,10 @@ impl<T: DistributedObject> Remote<T> {
         self.object
     }
 
-    pub const fn observed_location(&self) -> ObjectLocation {
-        self.location
+    pub fn observed_location(&self) -> ObjectLocation {
+        self.client
+            .resolve_object(self.object)
+            .unwrap_or(self.location)
     }
 
     /// Releases this strong handle. The locality lease is released when this
@@ -1969,11 +2696,23 @@ impl<T: DistributedObject> Remote<T> {
         self.client.transfer_object(self, destination)
     }
 
+    /// Starts explicit migration to an exact logical place.
+    ///
+    /// # Errors
+    /// Returns typed placement, mobility, snapshot, resource, transport,
+    /// rollback, post-commit, or shutdown errors.
+    pub fn migrate_to(&self, destination: Place) -> Result<MigrationFuture<T>, RuntimeError>
+    where
+        T: MobileObject,
+    {
+        self.client.migrate(self, destination)
+    }
+
     pub fn downgrade(&self) -> WeakRemote<T> {
         WeakRemote {
             object: self.object,
             object_type: self.object_type,
-            location: self.location,
+            location: self.lease.location,
             marker: PhantomData,
         }
     }

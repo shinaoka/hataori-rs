@@ -49,6 +49,7 @@ pub struct DomainStats {
 pub(crate) struct ObjectJob {
     pub object: ObjectId,
     pub read: bool,
+    pub placement: bool,
 }
 
 pub(crate) struct ActionJob {

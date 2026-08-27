@@ -163,7 +163,8 @@ fn stale_epoch_and_busy_writer_fail_without_blocking() {
         .get(&object)
         .unwrap()
         .clone();
-    let _write = match &entry.state {
+    let erased = entry.resident_state().unwrap();
+    let _write = match &*erased {
         ErasedState::ReadWrite(state) => state.write().unwrap(),
         ErasedState::Exclusive(_) => unreachable!(),
     };
@@ -197,7 +198,8 @@ fn read_write_mode_allows_parallel_read_guards() {
         let entry = Arc::clone(&entry);
         let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
-            let ErasedState::ReadWrite(state) = &entry.state else {
+            let erased = entry.resident_state().unwrap();
+            let ErasedState::ReadWrite(state) = &*erased else {
                 unreachable!()
             };
             let _read = state.read().unwrap();
@@ -278,6 +280,47 @@ fn transfer_pin_is_bounded_until_ack_or_release() {
     assert_eq!(service.stats(Instant::now()).transfers, 1);
     assert!(service.ack_transfer(object, LocalityId::new(3)));
     assert_eq!(service.stats(Instant::now()).transfers, 0);
+}
+
+#[test]
+fn migration_packet_round_trips_segments_and_rejects_bad_headers() {
+    let run = RunId::new(5).unwrap();
+    let packet = MigrationPacket {
+        migration: RequestId::new(LocalityId::new(1), 9).unwrap(),
+        object: ObjectId::new(run, 7).unwrap(),
+        object_type: ObjectTypeId::new(8).unwrap(),
+        authority: LocalityId::new(1),
+        from: ObjectLocation::new(LocalityId::new(1), DomainId::DEFAULT, 2, 1, 3).unwrap(),
+        destination: Place::new(LocalityId::new(2), DomainId::new(4)),
+        snapshot_version: 6,
+        snapshot_schema: 7,
+        snapshot: vec![vec![1, 2], vec![3]],
+    };
+    let encoded = packet.clone().encode().unwrap();
+    let decoded = MigrationPacket::decode(encoded.clone()).unwrap();
+    assert_eq!(decoded.migration, packet.migration);
+    assert_eq!(decoded.object, packet.object);
+    assert_eq!(decoded.from, packet.from);
+    assert_eq!(decoded.destination, packet.destination);
+    assert_eq!(decoded.snapshot, packet.snapshot);
+    let mut bad = encoded;
+    bad[0][4] = 9;
+    assert!(MigrationPacket::decode(bad).is_err());
+}
+
+#[test]
+fn migration_snapshot_limits_fail_before_retention() {
+    let (service, _, _, _) = service();
+    let too_many = vec![Vec::new(); service.limits.max_snapshot_segments + 1];
+    assert!(matches!(
+        service.validate_snapshot(&too_many),
+        Err(ActionError::User(message)) if message.contains("segment")
+    ));
+    let too_large = vec![vec![0; service.limits.max_snapshot_bytes + 1]];
+    assert!(matches!(
+        service.validate_snapshot(&too_large),
+        Err(ActionError::User(message)) if message.contains("byte")
+    ));
 }
 
 #[test]

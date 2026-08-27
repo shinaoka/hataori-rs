@@ -86,6 +86,17 @@ fn run_round<C: Communicator + CommunicatorCollectives>(world: &C, run: u128) {
         )
         .unwrap();
     let remote = collective_block_on(world, &mut runtime, create).unwrap();
+    let migration = remote
+        .migrate_to(Place::new(
+            LocalityId::new(world.rank() as u64),
+            DomainId::DEFAULT,
+        ))
+        .unwrap();
+    let migration = collective_block_on(world, &mut runtime, migration).unwrap();
+    assert_eq!(
+        migration.to.locality(),
+        LocalityId::new(world.rank() as u64)
+    );
     let call = remote.call_write(CounterAdd(5)).unwrap();
     assert_eq!(
         collective_block_on(world, &mut runtime, call).unwrap(),

@@ -1,8 +1,8 @@
 # Object placement and locality-aware task API
 
-**Status:** Phase C fixed-placement object creation, typed calls, leases, roots,
-weak upgrades, transfer, resolver routing, and colocation implemented; Phase D
-migration and Phase E object-aware algorithms remain future work
+**Status:** Phase C object creation, typed calls, leases, roots, weak upgrades,
+transfer, resolver routing, and colocation implemented; Phase D manual
+migration implemented; Phase E object-aware algorithms remain future work
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 

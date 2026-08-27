@@ -1,5 +1,6 @@
 use hataori_runtime::{
-    Action, ActionError, DistributedObject, ObjectWriteAction, RuntimeBuilder, Segments, WireValue,
+    Action, ActionError, DistributedObject, MobileObject, Mobility, ObjectWriteAction,
+    RestoreContext, RuntimeBuilder, Segments, WireValue,
 };
 
 pub struct Increment(pub u64);
@@ -37,6 +38,20 @@ impl DistributedObject for Counter {
     const TYPE_ID: u128 = 1001;
 }
 
+impl MobileObject for Counter {
+    const MOBILITY: Mobility = Mobility::Migratable;
+    const SNAPSHOT_VERSION: u32 = 1;
+    type Snapshot = u64;
+
+    fn freeze(&mut self) -> Result<Self::Snapshot, ActionError> {
+        Ok(self.0)
+    }
+
+    fn restore(snapshot: Self::Snapshot, _: RestoreContext) -> Result<Self, ActionError> {
+        Ok(Self(snapshot))
+    }
+}
+
 pub struct CounterAdd(pub u64);
 
 impl WireValue for CounterAdd {
@@ -60,7 +75,7 @@ impl ObjectWriteAction<Counter> for CounterAdd {
 
 pub fn register(builder: &mut RuntimeBuilder) -> Result<(), Box<dyn std::error::Error>> {
     builder.register::<Increment, _>(|value| Ok(value.0 + 1))?;
-    builder.register_object_exclusive::<Counter>()?;
+    builder.register_mobile_object_exclusive::<Counter>()?;
     builder.register_object_write::<Counter, CounterAdd>()?;
     Ok(())
 }

@@ -1,5 +1,5 @@
 use hataori_runtime_foundation::{
-    protocol::{ActionId, DomainId, LocalityId, ObjectId, ObjectTypeId, RequestId},
+    protocol::{ActionId, DomainId, LocalityId, ObjectId, ObjectLocation, ObjectTypeId, RequestId},
     transport::TransportError,
 };
 use std::{fmt, time::Duration};
@@ -30,6 +30,11 @@ pub enum ResourceKind {
     ObjectRoots,
     PlacementTickets,
     LeaseTransfers,
+    Migrations,
+    PreparedMigrations,
+    Forwarders,
+    SnapshotBytes,
+    SnapshotSegments,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +89,27 @@ pub enum RuntimeError {
     ObjectAction(String),
     InvalidObjectTypeId,
     InvalidObjectConcurrency,
+    PinnedObjectType(ObjectTypeId),
+    MigrationInProgress(ObjectId),
+    MigrationConflict(ObjectId),
+    Migration {
+        request: RequestId,
+        message: String,
+    },
+    MigrationRolledBack(ObjectId),
+    MigrationCommittedFailure {
+        object: ObjectId,
+        message: String,
+    },
+    SnapshotTooLarge {
+        bytes: usize,
+        limit: usize,
+    },
+    Moved {
+        object: ObjectId,
+        location: ObjectLocation,
+    },
+    RedirectLimit(ObjectId),
     InvalidActionId,
     InvalidSchema,
     InvalidDeadline,

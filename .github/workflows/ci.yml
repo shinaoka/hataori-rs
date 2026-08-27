@@ -48,6 +48,8 @@ jobs:
         run: scripts/check-phase-b-runtime.sh
       - name: Check Phase C fixed-placement remote objects
         run: scripts/check-phase-c-objects.sh
+      - name: Check Phase D explicit object migration
+        run: scripts/check-phase-d-migration.sh
 
   tenferro-adapter:
     runs-on: ubuntu-latest

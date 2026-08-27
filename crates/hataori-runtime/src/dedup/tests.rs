@@ -39,6 +39,39 @@ fn byte_exhaustion_keeps_completion_marker_without_reexecution() {
 }
 
 #[test]
+fn redirect_tombstone_suppresses_stale_duplicates_then_allows_current_retry() {
+    let now = Instant::now();
+    let (request, action, domain) = ids();
+    let mut table = DedupTable::new(2, 128, Duration::from_secs(1));
+    assert!(matches!(
+        table.begin(request, action, domain, now).unwrap(),
+        DedupDisposition::New(_)
+    ));
+    table
+        .complete(
+            RuntimeMessage {
+                kind: RuntimeMessageKind::Moved,
+                request,
+                action,
+                domain,
+                deadline_ms: 0,
+                payload: vec![vec![0; 32], vec![0; 32]],
+            },
+            now,
+        )
+        .unwrap();
+    assert!(matches!(
+        table.begin(request, action, domain, now).unwrap(),
+        DedupDisposition::Running
+    ));
+    table.release_redirect(request, action, domain).unwrap();
+    assert!(matches!(
+        table.begin(request, action, domain, now).unwrap(),
+        DedupDisposition::New(_)
+    ));
+}
+
+#[test]
 fn cancellation_tombstone_and_metadata_checks_are_bounded() {
     let now = Instant::now();
     let (request, action, domain) = ids();

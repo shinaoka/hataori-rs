@@ -4,11 +4,14 @@ use crate::{
     domain::{ActionCompletion, ActionJob, DomainConfig, DomainRegistry, DomainStats},
     error::{cap, ResourceKind, RuntimeError, RuntimeState},
     object::{
-        create_action_id, ColocatedFuture, CreateFuture, DistributedObject, LeaseTransfer,
-        LocalLeaseManager, ObjectCallFuture, ObjectEnvelope, ObjectLimits, ObjectReadAction,
-        ObjectRegistry, ObjectService, ObjectStats, ObjectWriteAction, PlacementFallback,
-        PlacementFuture, Remote, RootedCreateFuture, TransferFuture, UpgradeFuture, WeakRemote,
-        LEASE_ACQUIRE_ACTION_ID, LEASE_RELEASE_ACTION_ID, LEASE_RENEW_ACTION_ID,
+        create_action_id, decode_location, encode_location, placement_action_id, ColocatedFuture,
+        CreateFuture, DistributedObject, LeaseTransfer, LocalLeaseManager, MigrationFuture,
+        MigrationPacket, MigrationReport, MobileObject, Mobility, ObjectCallFuture, ObjectEnvelope,
+        ObjectLimits, ObjectReadAction, ObjectRegistry, ObjectService, ObjectStats,
+        ObjectWriteAction, PlacementFallback, PlacementFuture, Remote, RemoteCallSpec,
+        RemoteObjectCall, Retirement, RootedCreateFuture, TransferFuture, UpgradeFuture,
+        WeakRemote, LEASE_ACQUIRE_ACTION_ID, LEASE_RELEASE_ACTION_ID, LEASE_RENEW_ACTION_ID,
+        MIGRATION_FREEZE_ACTION_ID, MIGRATION_HEADER_BYTES, MIGRATION_RETIRE_ACTION_ID,
         ROOT_RELEASE_ACTION_ID, TRANSFER_ACK_ACTION_ID,
     },
     pending::{PendingEntry, PendingTable, Promise, RemoteFuture},
@@ -37,7 +40,7 @@ use std::{
 
 const RUNTIME_VERSION: RuntimeVersion = RuntimeVersion {
     major: 0,
-    minor: 2,
+    minor: 3,
     patch: 0,
 };
 
@@ -160,7 +163,19 @@ impl RuntimeBuilder {
         if self.sealed {
             return Err(RuntimeError::BuilderSealed);
         }
-        self.object_limits = limits.validate()?;
+        let limits = limits.validate()?;
+        if limits.max_snapshot_bytes
+            > self
+                .protocol_limits
+                .max_payload_bytes
+                .saturating_sub(MIGRATION_HEADER_BYTES)
+            || limits.max_snapshot_segments >= self.protocol_limits.max_segments
+        {
+            return Err(RuntimeError::InvalidLimits(
+                "migration snapshot exceeds protocol payload limits",
+            ));
+        }
+        self.object_limits = limits;
         Ok(self)
     }
 
@@ -193,6 +208,48 @@ impl RuntimeBuilder {
             return Err(RuntimeError::DuplicateAction(create));
         }
         self.object_registry.register_read_write::<T>()?;
+        Ok(self)
+    }
+
+    /// Registers an exclusive migratable or reconstructible object type.
+    ///
+    /// # Errors
+    /// Returns a sealed-builder, duplicate ID/type, pinned mobility, invalid
+    /// schema, or registry collision error.
+    pub fn register_mobile_object_exclusive<T: MobileObject>(
+        &mut self,
+    ) -> Result<&mut Self, RuntimeError> {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        let object_type =
+            ObjectTypeId::new(T::TYPE_ID).map_err(|_| RuntimeError::InvalidObjectTypeId)?;
+        let create = create_action_id(object_type)?;
+        if self.registry.get(create).is_some() {
+            return Err(RuntimeError::DuplicateAction(create));
+        }
+        self.object_registry.register_mobile_exclusive::<T>()?;
+        Ok(self)
+    }
+
+    /// Registers a read/write migratable or reconstructible object type.
+    ///
+    /// # Errors
+    /// Returns a sealed-builder, duplicate ID/type, pinned mobility, invalid
+    /// schema, or registry collision error.
+    pub fn register_mobile_object_read_write<T: MobileObject + Sync>(
+        &mut self,
+    ) -> Result<&mut Self, RuntimeError> {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        let object_type =
+            ObjectTypeId::new(T::TYPE_ID).map_err(|_| RuntimeError::InvalidObjectTypeId)?;
+        let create = create_action_id(object_type)?;
+        if self.registry.get(create).is_some() {
+            return Err(RuntimeError::DuplicateAction(create));
+        }
+        self.object_registry.register_mobile_read_write::<T>()?;
         Ok(self)
     }
 
@@ -237,10 +294,16 @@ impl RuntimeBuilder {
             return Err(RuntimeError::BuilderSealed);
         }
         let id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
-        if self.object_registry.reserves_action(id) {
+        let placement = placement_action_id(id)?;
+        if self.object_registry.reserves_action(id)
+            || self.object_registry.reserves_action(placement)
+            || self.registry.get(placement).is_some()
+        {
             return Err(RuntimeError::DuplicateAction(id));
         }
         self.registry.register::<A, F>(handler)?;
+        let handler = self.registry.get(id).cloned().unwrap();
+        self.object_registry.register_placement::<A>(handler)?;
         Ok(self)
     }
 
@@ -594,12 +657,46 @@ impl RuntimeClient {
             .objects
             .resolve(remote.object)
             .unwrap_or(remote.location);
-        let ticket = self
-            .shared
-            .objects
-            .placement_ticket(Arc::clone(&remote.lease))?;
-        let future = self.spawn_on(Place::new(location.locality(), location.domain()), action)?;
-        Ok(ColocatedFuture::new(future, ticket))
+        let action_id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
+        let action_payload = action
+            .encode()
+            .map_err(|error| RuntimeError::Protocol(format!("action encode failed: {error}")))?;
+        let payload = ObjectEnvelope {
+            object: remote.object,
+            object_type: remote.object_type,
+            epoch: location.epoch(),
+            lease_locality: self.shared.local_id,
+            domain: location.domain(),
+            rooted: false,
+        }
+        .encode(action_payload.clone());
+        let placed_action = placement_action_id(action_id)?;
+        let deadline = self.shared.limits.default_deadline;
+        let future = self.spawn_encoded(
+            Place::new(location.locality(), location.domain()),
+            placed_action,
+            payload,
+            SpawnOptions {
+                deadline,
+                trace_id: None,
+            },
+        )?;
+        Ok(ColocatedFuture::new(
+            RemoteObjectCall::new(
+                future,
+                self.clone(),
+                RemoteCallSpec {
+                    object: remote.object,
+                    object_type: remote.object_type,
+                    action: placed_action,
+                    payload: action_payload,
+                    last_epoch: location.epoch(),
+                    max_redirects: self.shared.objects.limits.max_redirects,
+                    deadline,
+                },
+            ),
+            Arc::clone(&remote.lease),
+        ))
     }
 
     pub fn spawn_preferred_colocated<T, A>(
@@ -625,37 +722,37 @@ impl RuntimeClient {
             deadline: self.shared.limits.default_deadline,
             trace_id: None,
         };
-        let ticket = match self
-            .shared
-            .objects
-            .placement_ticket(Arc::clone(&remote.lease))
-        {
-            Ok(ticket) => ticket,
-            Err(error @ RuntimeError::ResourceExhausted { .. }) => {
-                let place = match fallback {
-                    PlacementFallback::Any => Place::new(self.shared.local_id, DomainId::DEFAULT),
-                    PlacementFallback::Place(place) => place,
-                    PlacementFallback::Reject => return Err(error),
-                };
-                let future = self.spawn_encoded(place, action_id, payload, options)?;
-                return Ok(PlacementFuture::fallback(
-                    future,
-                    fallback,
-                    self.clone(),
-                    action_id,
-                    options,
-                ));
-            }
-            Err(error) => return Err(error),
-        };
+        let preferred_payload = ObjectEnvelope {
+            object: remote.object,
+            object_type: remote.object_type,
+            epoch: location.epoch(),
+            lease_locality: self.shared.local_id,
+            domain: location.domain(),
+            rooted: false,
+        }
+        .encode(payload.clone());
+        let placed_action = placement_action_id(action_id)?;
         let preferred = self.spawn_encoded(
             Place::new(location.locality(), location.domain()),
-            action_id,
-            payload.clone(),
+            placed_action,
+            preferred_payload,
             options,
         )?;
+        let preferred = RemoteObjectCall::new(
+            preferred,
+            self.clone(),
+            RemoteCallSpec {
+                object: remote.object,
+                object_type: remote.object_type,
+                action: placed_action,
+                payload: payload.clone(),
+                last_epoch: location.epoch(),
+                max_redirects: self.shared.objects.limits.max_redirects,
+                deadline: options.deadline,
+            },
+        );
         Ok(PlacementFuture::new(
-            ColocatedFuture::new(preferred, ticket),
+            ColocatedFuture::new(preferred, Arc::clone(&remote.lease)),
             fallback,
             self.clone(),
             action_id,
@@ -684,6 +781,28 @@ impl RuntimeClient {
         payload: Segments,
         options: SpawnOptions,
     ) -> Result<RemoteFuture<T>, RuntimeError> {
+        self.spawn_encoded_inner(place, action_id, payload, options, None)
+    }
+
+    pub(crate) fn spawn_encoded_retry<T: WireValue>(
+        &self,
+        place: Place,
+        action_id: ActionId,
+        payload: Segments,
+        options: SpawnOptions,
+        request: RequestId,
+    ) -> Result<RemoteFuture<T>, RuntimeError> {
+        self.spawn_encoded_inner(place, action_id, payload, options, Some(request))
+    }
+
+    fn spawn_encoded_inner<T: WireValue>(
+        &self,
+        place: Place,
+        action_id: ActionId,
+        payload: Segments,
+        options: SpawnOptions,
+        request: Option<RequestId>,
+    ) -> Result<RemoteFuture<T>, RuntimeError> {
         self.shared.ensure_running()?;
         if options.deadline.is_zero() {
             return Err(RuntimeError::InvalidDeadline);
@@ -695,7 +814,10 @@ impl RuntimeClient {
             .map_err(|_| RuntimeError::InvalidDeadline)?;
         let _gate = self.shared.work_gate.lock().unwrap();
         self.shared.ensure_running()?;
-        let request = self.shared.next_request()?;
+        let request = match request {
+            Some(request) => request,
+            None => self.shared.next_request()?,
+        };
         let promise = Arc::new(Promise::new());
         let expires_at = Instant::now()
             .checked_add(options.deadline)
@@ -859,22 +981,31 @@ impl RuntimeClient {
         T: DistributedObject + Sync,
         A: ObjectReadAction<T>,
     {
-        if remote.location.locality() == self.shared.local_id {
+        let location = self
+            .shared
+            .objects
+            .resolve(remote.object)
+            .unwrap_or(remote.location);
+        if location.locality() == self.shared.local_id
+            && self
+                .shared
+                .objects
+                .is_local_resident(remote.object, location)
+        {
             let object = remote.object;
             let object_type = remote.object_type;
-            let location = remote.location;
             let objects = Arc::clone(&self.shared.objects);
-            return Ok(ObjectCallFuture::Local(Some(
+            return Ok(ObjectCallFuture::local(
                 self.run_local_object(location.domain(), move || {
                     objects.call_read_local(object, object_type, location, action)
                 }),
-            )));
+            ));
         }
         let payload = action.encode().map_err(|error| {
             RuntimeError::Protocol(format!("object action encode failed: {error}"))
         })?;
         self.call_object(remote, A::ID, payload)
-            .map(ObjectCallFuture::Remote)
+            .map(ObjectCallFuture::remote)
     }
 
     pub fn call_object_write<T, A>(
@@ -886,30 +1017,39 @@ impl RuntimeClient {
         T: DistributedObject,
         A: ObjectWriteAction<T>,
     {
-        if remote.location.locality() == self.shared.local_id {
+        let location = self
+            .shared
+            .objects
+            .resolve(remote.object)
+            .unwrap_or(remote.location);
+        if location.locality() == self.shared.local_id
+            && self
+                .shared
+                .objects
+                .is_local_resident(remote.object, location)
+        {
             let object = remote.object;
             let object_type = remote.object_type;
-            let location = remote.location;
             let objects = Arc::clone(&self.shared.objects);
-            return Ok(ObjectCallFuture::Local(Some(
+            return Ok(ObjectCallFuture::local(
                 self.run_local_object(location.domain(), move || {
                     objects.call_write_local(object, object_type, location, action)
                 }),
-            )));
+            ));
         }
         let payload = action.encode().map_err(|error| {
             RuntimeError::Protocol(format!("object action encode failed: {error}"))
         })?;
         self.call_object(remote, A::ID, payload)
-            .map(ObjectCallFuture::Remote)
+            .map(ObjectCallFuture::remote)
     }
 
     fn call_object<T: DistributedObject, O: WireValue>(
         &self,
         remote: &Remote<T>,
         raw_action: u128,
-        payload: Segments,
-    ) -> Result<RemoteFuture<O>, RuntimeError> {
+        action_payload: Segments,
+    ) -> Result<RemoteObjectCall<O>, RuntimeError> {
         let action = ActionId::new(raw_action).map_err(|_| RuntimeError::InvalidActionId)?;
         let location = self
             .shared
@@ -924,16 +1064,147 @@ impl RuntimeClient {
             domain: location.domain(),
             rooted: false,
         }
-        .encode(payload);
-        self.spawn_encoded(
+        .encode(action_payload.clone());
+        let deadline = self.shared.limits.default_deadline;
+        let future = self.spawn_encoded(
             Place::new(location.locality(), location.domain()),
             action,
             payload,
+            SpawnOptions {
+                deadline,
+                trace_id: None,
+            },
+        )?;
+        Ok(RemoteObjectCall::new(
+            future,
+            self.clone(),
+            RemoteCallSpec {
+                object: remote.object,
+                object_type: remote.object_type,
+                action,
+                payload: action_payload,
+                last_epoch: location.epoch(),
+                max_redirects: self.shared.objects.limits.max_redirects,
+                deadline,
+            },
+        ))
+    }
+
+    pub(crate) fn resolve_object(
+        &self,
+        object: ObjectId,
+    ) -> Option<hataori_runtime_foundation::protocol::ObjectLocation> {
+        self.shared.objects.resolve(object)
+    }
+
+    pub(crate) fn cache_object_location(
+        &self,
+        object: ObjectId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+    ) {
+        self.shared.objects.cache_location(object, location);
+    }
+
+    pub fn clear_object_resolver(&self) {
+        self.shared.objects.clear_resolver();
+    }
+
+    /// Starts explicit migration to an exact logical place.
+    ///
+    /// # Errors
+    /// Returns typed placement, mobility, snapshot, resource, transport,
+    /// rollback, post-commit, or shutdown errors.
+    pub fn migrate<T: MobileObject>(
+        &self,
+        remote: &Remote<T>,
+        destination: Place,
+    ) -> Result<MigrationFuture<T>, RuntimeError> {
+        {
+            let _gate = self.shared.work_gate.lock().unwrap();
+            self.shared.ensure_running()?;
+        }
+        let from = self
+            .shared
+            .objects
+            .resolve(remote.object)
+            .unwrap_or(remote.location);
+        if from.locality() == destination.locality && from.domain() == destination.domain {
+            return Ok(MigrationFuture::ready(
+                MigrationReport {
+                    object: remote.object,
+                    from,
+                    to: from,
+                    snapshot_bytes: 0,
+                },
+                remote.object_type,
+            ));
+        }
+        let (mobility, snapshot_version, snapshot_schema) =
+            self.shared.objects.migration_metadata(remote.object_type)?;
+        if mobility == Mobility::Pinned {
+            return Err(RuntimeError::PinnedObjectType(remote.object_type));
+        }
+        let migration = self.shared.next_request()?;
+        self.shared.objects.begin_migration(migration)?;
+        let packet = MigrationPacket {
+            migration,
+            object: remote.object,
+            object_type: remote.object_type,
+            authority: remote.lease.location.locality(),
+            from,
+            destination,
+            snapshot_version,
+            snapshot_schema,
+            snapshot: Vec::new(),
+        };
+        let future = self.migration_step(
+            Place::new(from.locality(), from.domain()),
+            MIGRATION_FREEZE_ACTION_ID,
+            packet.clone(),
+        );
+        match future {
+            Ok(future) => Ok(MigrationFuture::new(
+                self.clone(),
+                Arc::clone(&self.shared.objects),
+                Arc::clone(&remote.lease),
+                packet,
+                remote.lease.location,
+                future,
+            )),
+            Err(error) => {
+                self.shared.objects.finish_migration(
+                    migration,
+                    crate::object::MigrationOutcome::RolledBack,
+                    0,
+                );
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn migration_step(
+        &self,
+        place: Place,
+        action: u128,
+        packet: MigrationPacket,
+    ) -> Result<RemoteFuture<MigrationPacket>, RuntimeError> {
+        self.spawn_encoded(
+            place,
+            ActionId::new(action).map_err(|_| RuntimeError::InvalidActionId)?,
+            packet
+                .encode()
+                .map_err(|error| RuntimeError::ObjectAction(error.message()))?,
             SpawnOptions {
                 deadline: self.shared.limits.default_deadline,
                 trace_id: None,
             },
         )
+    }
+
+    pub(crate) fn fail_committed_migration(&self) {
+        self.shared
+            .state
+            .store(RuntimeState::Failed as u8, Ordering::Release);
     }
 
     pub fn transfer_object<T: DistributedObject>(
@@ -1222,13 +1493,23 @@ impl Runtime {
                 "one maximum runtime parcel must fit the action byte reservation",
             ));
         }
+        let mut object_limits = ObjectLimits::default();
+        object_limits.max_snapshot_bytes = object_limits.max_snapshot_bytes.min(
+            protocol_limits
+                .max_payload_bytes
+                .saturating_sub(MIGRATION_HEADER_BYTES),
+        );
+        object_limits.max_snapshot_segments = object_limits
+            .max_snapshot_segments
+            .min(protocol_limits.max_segments.saturating_sub(1));
+        let object_limits = object_limits.validate()?;
         Ok(RuntimeBuilder {
             run_id,
             protocol_limits,
             runtime_limits: runtime_limits.validate()?,
             registry: ActionRegistry::default(),
             object_registry: ObjectRegistry::default(),
-            object_limits: ObjectLimits::default(),
+            object_limits,
             domains: Vec::new(),
             sealed: false,
         })
@@ -1304,6 +1585,59 @@ impl Runtime {
         self.client().spawn_colocated(remote, action)
     }
 
+    pub fn clear_object_resolver(&self) {
+        self.shared.objects.clear_resolver();
+    }
+
+    /// Starts explicit migration to an exact logical place.
+    ///
+    /// # Errors
+    /// Returns typed placement, mobility, snapshot, resource, transport,
+    /// rollback, post-commit, or shutdown errors.
+    pub fn migrate<T: MobileObject>(
+        &self,
+        remote: &Remote<T>,
+        destination: Place,
+    ) -> Result<MigrationFuture<T>, RuntimeError> {
+        self.client().migrate(remote, destination)
+    }
+
+    fn send_retirement(&self, retirement: &Retirement) -> Result<(), RuntimeError> {
+        let request = self.shared.next_request()?;
+        let packet = MigrationPacket {
+            migration: request,
+            object: retirement.object,
+            object_type: retirement.object_type,
+            authority: retirement.authority,
+            from: retirement.location,
+            destination: Place::new(retirement.location.locality(), retirement.location.domain()),
+            snapshot_version: retirement.snapshot_version,
+            snapshot_schema: retirement.snapshot_schema,
+            snapshot: Vec::new(),
+        };
+        let payload = match packet.encode() {
+            Ok(payload) => payload,
+            Err(error) => return Err(RuntimeError::ObjectAction(error.message())),
+        };
+        let message = RuntimeMessage {
+            kind: RuntimeMessageKind::Request,
+            request,
+            action: ActionId::new(MIGRATION_RETIRE_ACTION_ID).unwrap(),
+            domain: retirement.location.domain(),
+            deadline_ms: u64::try_from(self.shared.limits.default_deadline.as_millis().max(1))
+                .unwrap_or(u64::MAX),
+            payload,
+        };
+        self.shared
+            .send(
+                retirement.location.locality(),
+                message,
+                TicketPurpose::BestEffort,
+                None,
+            )
+            .map(|_| ())
+    }
+
     pub fn progress(&mut self, max_events: usize) -> Result<RuntimeProgress, RuntimeError> {
         let state = self.state();
         if !matches!(state, RuntimeState::Running | RuntimeState::Draining) {
@@ -1323,6 +1657,16 @@ impl Runtime {
             lease.renew();
         }
         self.objects.expire(now);
+        for retirement in self.objects.take_retirements(limit) {
+            let object = retirement.object;
+            match self.send_retirement(&retirement) {
+                Ok(()) => self.objects.finish_retirement(object),
+                Err(_) => {
+                    self.objects.requeue_retirement(retirement);
+                    break;
+                }
+            }
+        }
         let mut events = Vec::new();
         let transport = self.driver.progress(&mut events, limit).map_err(|error| {
             self.fail(RuntimeError::Transport(error.clone()));
@@ -1536,6 +1880,15 @@ impl Runtime {
             || report.stats.dedup_entries != 0
             || report.stats.queued_responses != 0
             || report.stats.queued_response_bytes != 0
+            || report.stats.objects.live_objects != 0
+            || report.stats.objects.leases != 0
+            || report.stats.objects.roots != 0
+            || report.stats.objects.placement_tickets != 0
+            || report.stats.objects.transfers != 0
+            || report.stats.objects.active_migrations != 0
+            || report.stats.objects.prepared_migrations != 0
+            || report.stats.objects.forwarding_entries != 0
+            || report.stats.objects.migration_snapshot_bytes != 0
             || report.stats.transport.retained_bytes() != 0
         {
             return Err(RuntimeError::RetainedResources);
@@ -1553,11 +1906,12 @@ impl Runtime {
             .cloned()
             .ok_or(RuntimeError::UnknownAction(action_id))
             .and_then(|handler| {
-                self.domains.submit(ActionJob {
+                let domain = request.message.domain;
+                let job = ActionJob {
                     requester: self.shared.local_id,
                     request: request_id,
                     action_id,
-                    domain: request.message.domain,
+                    domain,
                     trace_id: request.trace_id,
                     input: request.message.payload,
                     handler,
@@ -1565,7 +1919,21 @@ impl Runtime {
                     local: true,
                     submitted_at: Instant::now(),
                     object: None,
-                })
+                };
+                let Some(job) =
+                    self.objects
+                        .admit(action_id, job, self.domains.can_submit(domain))?
+                else {
+                    return Ok(());
+                };
+                let admitted = job.object;
+                if let Err(error) = self.domains.submit(job) {
+                    if let Some(admitted) = admitted {
+                        self.objects.rollback(admitted);
+                    }
+                    return Err(error);
+                }
+                Ok(())
             });
         if let Err(error) = result {
             if let Some(entry) = self.shared.pending.remove(request_id) {
@@ -1667,6 +2035,21 @@ impl Runtime {
                     Err(RuntimeError::DuplicateResultUnavailable(message.request))
                 })
             }
+            RuntimeMessageKind::Moved => self.complete_pending(source, message, |message| {
+                if message.payload.len() != 2 || message.payload[0].len() != 32 {
+                    return Err(RuntimeError::Protocol("invalid moved payload".into()));
+                }
+                let identity = &message.payload[0];
+                let run = RunId::new(u128::from_le_bytes(identity[0..16].try_into().unwrap()))
+                    .map_err(|_| RuntimeError::Protocol("invalid moved run".into()))?;
+                let object = ObjectId::new(
+                    run,
+                    u128::from_le_bytes(identity[16..32].try_into().unwrap()),
+                )
+                .map_err(|_| RuntimeError::Protocol("invalid moved object".into()))?;
+                let location = decode_location(message.payload[1].clone())?;
+                Err(RuntimeError::Moved { object, location })
+            }),
         }
     }
 
@@ -1678,6 +2061,13 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         if self.state() != RuntimeState::Running {
             return self.send_failure(source, &message, "runtime is shutting down", trace_id);
+        }
+        if self
+            .objects
+            .request_targets_current(message.action, &message.payload)
+        {
+            self.dedup
+                .release_redirect(message.request, message.action, message.domain)?;
         }
         match self.dedup.begin(
             message.request,
@@ -1714,6 +2104,10 @@ impl Runtime {
                 );
                 let Some(job) = (match admitted {
                     Ok(job) => job,
+                    Err(RuntimeError::Moved { object, location }) => {
+                        return self
+                            .send_and_cache_moved(source, message, object, location, trace_id);
+                    }
                     Err(error) => {
                         return self.send_and_cache_failure(
                             source,
@@ -1725,7 +2119,11 @@ impl Runtime {
                 }) else {
                     return Ok(());
                 };
+                let admitted = job.object;
                 if let Err(error) = self.domains.submit(job) {
+                    if let Some(admitted) = admitted {
+                        self.objects.rollback(admitted);
+                    }
                     return self.send_and_cache_failure(
                         source,
                         message,
@@ -1878,6 +2276,32 @@ impl Runtime {
             trace_id,
             false,
         )
+    }
+
+    fn send_and_cache_moved(
+        &mut self,
+        destination: LocalityId,
+        request: RuntimeMessage,
+        object: ObjectId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+        trace_id: Option<TraceId>,
+    ) -> Result<(), RuntimeError> {
+        let mut identity = Vec::with_capacity(32);
+        identity.extend_from_slice(&object.run().get().to_le_bytes());
+        identity.extend_from_slice(&object.unique().to_le_bytes());
+        let location = encode_location(location)
+            .map_err(|error| RuntimeError::Protocol(error.message()))?
+            .pop()
+            .ok_or_else(|| RuntimeError::Protocol("missing moved location".into()))?;
+        let response = RuntimeMessage {
+            kind: RuntimeMessageKind::Moved,
+            request: request.request,
+            action: request.action,
+            domain: request.domain,
+            deadline_ms: 0,
+            payload: vec![identity, location],
+        };
+        self.queue_response(destination, response, trace_id, true)
     }
 
     fn send_and_cache_failure(

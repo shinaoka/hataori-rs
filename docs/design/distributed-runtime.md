@@ -1,6 +1,6 @@
 # Hataori distributed runtime architecture
 
-**Status:** Accepted long-term direction; phases A-C protocol, transport, structured runtime, and pinned remote objects implemented; phases D-E not implemented
+**Status:** Accepted long-term direction; phases A-D protocol, transport, structured runtime, remote objects, and explicit migration implemented; Phase E not implemented
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
@@ -34,10 +34,10 @@ The unpublished `hataori-runtime-foundation` workspace crate implements the
 Phase A protocol, deterministic memory backend, TCP rendezvous/transport, and
 MPI transport described below. The unpublished `hataori-runtime` crate implements the Phase B owner-thread
 lifecycle and structured execution described in
-[`phase-b-runtime.md`](phase-b-runtime.md), plus the Phase C pinned remote object,
-directory/resolver, lease/root, typed object-action, and collection boundary in
-[`phase-c-objects.md`](phase-c-objects.md). Migration and rebuilt algorithms
-remain unimplemented.
+[`phase-b-runtime.md`](phase-b-runtime.md), the Phase C remote-object boundary
+in [`phase-c-objects.md`](phase-c-objects.md), and Phase D explicit migration in
+[`phase-d-migration.md`](phase-d-migration.md). Rebuilt algorithms remain
+unimplemented.
 
 The long-term system is a long-lived Rust distributed runtime. It should support:
 
@@ -969,11 +969,13 @@ Implemented in the unpublished `hataori-runtime` crate and detailed in
 
 ### Phase D: explicit migration
 
-- implement mobility capabilities, freeze/restore snapshots, streaming transfer,
-  epoch commit, redirects, forwarding, rollback-before-commit, and manual
-  `migrate`;
-- add reconstructible tensor adapter behavior without transferring executor or
-  context identity.
+Implemented in `hataori-runtime` and detailed in
+[`phase-d-migration.md`](phase-d-migration.md):
+
+- mobility capabilities, bounded segmented freeze/restore snapshots, epoch
+  commit, redirects, forwarding, rollback-before-commit, and manual `migrate`;
+- reconstructible object behavior that rebuilds destination-local resources
+  without transferring executor or context identity.
 
 ### Phase E: algorithms and policy
 

@@ -65,6 +65,7 @@ fn run_round(run: u128) {
     let finished = Arc::new(AtomicUsize::new(0));
     let created = Arc::new(AtomicUsize::new(0));
     let called = Arc::new(AtomicUsize::new(0));
+    let migrated = Arc::new(AtomicUsize::new(0));
     std::thread::scope(|scope| {
         let joins: Vec<_> = endpoints
             .into_iter()
@@ -74,6 +75,7 @@ fn run_round(run: u128) {
                 let finished = Arc::clone(&finished);
                 let created = Arc::clone(&created);
                 let called = Arc::clone(&called);
+                let migrated = Arc::clone(&migrated);
                 scope.spawn(move || {
                     let mut builder = Runtime::builder(
                         run_id,
@@ -118,6 +120,11 @@ fn run_round(run: u128) {
                         .create_at(Place::new(peer, DomainId::DEFAULT), Counter(run as u64))
                         .unwrap();
                     let remote = cooperative_block_on(&mut runtime, create, &created).unwrap();
+                    let migration = remote
+                        .migrate_to(Place::new(local_id, DomainId::DEFAULT))
+                        .unwrap();
+                    let report = cooperative_block_on(&mut runtime, migration, &migrated).unwrap();
+                    assert_eq!(report.to.locality(), local_id);
                     let call = remote.call_write(CounterAdd(5)).unwrap();
                     assert_eq!(
                         cooperative_block_on(&mut runtime, call, &called).unwrap(),

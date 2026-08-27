@@ -16,6 +16,7 @@ pub(crate) enum RuntimeMessageKind {
     Cancel = 4,
     Cancelled = 5,
     DuplicateResultUnavailable = 6,
+    Moved = 7,
 }
 
 impl TryFrom<u8> for RuntimeMessageKind {
@@ -29,6 +30,7 @@ impl TryFrom<u8> for RuntimeMessageKind {
             4 => Ok(Self::Cancel),
             5 => Ok(Self::Cancelled),
             6 => Ok(Self::DuplicateResultUnavailable),
+            7 => Ok(Self::Moved),
             _ => Err(WireError::InvalidKind(value)),
         }
     }
@@ -181,6 +183,11 @@ fn validate_shape(
             if !payload.is_empty() =>
         {
             Err(WireError::UnexpectedPayload)
+        }
+        RuntimeMessageKind::Moved
+            if payload.len() != 2 || payload[0].len() != 32 || payload[1].len() != 32 =>
+        {
+            Err(WireError::ErrorPayload)
         }
         RuntimeMessageKind::Failure
             if payload.len() != 1

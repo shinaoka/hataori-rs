@@ -1,7 +1,7 @@
 //! Long-lived bounded runtime and typed structured remote execution.
 //!
-//! Phase B structured execution and Phase C fixed-placement remote objects
-//! build on `hataori-runtime-foundation` without exposing backend types.
+//! Phase B structured execution, Phase C remote objects, and Phase D explicit
+//! migration build on `hataori-runtime-foundation` without exposing backend types.
 
 mod action;
 mod dedup;
@@ -17,10 +17,11 @@ pub use action::{Action, Segments, WireValue};
 pub use domain::{DomainConfig, DomainStats};
 pub use error::{ActionError, ResourceKind, RuntimeError, RuntimeState};
 pub use object::{
-    ColocatedFuture, CreateFuture, DistributedObject, LeaseTransfer, Mobility, ObjectAccess,
-    ObjectCallFuture, ObjectConcurrency, ObjectLimits, ObjectReadAction, ObjectRoot, ObjectStats,
-    ObjectWriteAction, PlacementFallback, PlacementFuture, Remote, RootedCreateFuture,
-    TransferFuture, UpgradeFuture, WeakRemote,
+    ColocatedFuture, CreateFuture, DistributedObject, LeaseTransfer, MigrationFuture,
+    MigrationReport, MobileObject, Mobility, ObjectAccess, ObjectCallFuture, ObjectConcurrency,
+    ObjectLimits, ObjectReadAction, ObjectRoot, ObjectStats, ObjectWriteAction, PlacementFallback,
+    PlacementFuture, Remote, RestoreContext, RootedCreateFuture, TransferFuture, UpgradeFuture,
+    WeakRemote,
 };
 pub use pending::RemoteFuture;
 pub use runtime::{

@@ -38,15 +38,17 @@ The unpublished `hataori-runtime-foundation` crate implements Issue #14 Phase A
 protocol and transport infrastructure. The unpublished `hataori-runtime` crate
 implements Phase B lifecycle, domains, typed actions/futures, scopes,
 deadlines, cancellation, bounded deduplication, observability, and shutdown,
-plus Phase C fixed-placement remote objects, leases, roots, resolver routing,
-typed object calls, colocation, and collection. Phase D-E migration and
-algorithm architecture remains forward-looking.
+plus Phase C fixed-placement remote objects and Phase D explicit migration,
+including mobility registration, snapshot/restore, epoch commit, redirects,
+rollback, forwarding, and retirement. Phase E algorithm architecture remains
+forward-looking.
 Read:
 
 - `docs/design.md` for the implemented P0 architecture;
 - `docs/design/phase-a-transport-foundation.md` for Phase A;
 - `docs/design/phase-b-runtime.md` for Phase B;
 - `docs/design/phase-c-objects.md` for Phase C;
+- `docs/design/phase-d-migration.md` for Phase D;
 - `docs/design/distributed-runtime.md` for the complete long-term architecture.
 
 For changes that establish or revise durable architecture, update the design

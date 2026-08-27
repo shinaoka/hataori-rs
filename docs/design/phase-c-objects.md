@@ -3,8 +3,9 @@
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
 **Status:** implementation contract for Phase C. Phase A transport and Phase B
-structured execution remain unchanged. Phase D migration and Phase E algorithms
-remain unimplemented.
+structured execution remain unchanged. Phase D migration is implemented by the
+separate [`phase-d-migration.md`](phase-d-migration.md) contract; Phase E
+algorithms remain unimplemented.
 
 ## 1. Ownership and scope
 

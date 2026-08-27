@@ -32,19 +32,20 @@ TCP rendezvous/transport, and MPI transport with segmented payloads. The
 unpublished `hataori-runtime` crate implements Phase B above that boundary:
 long-lived owner-thread progress, bounded worker domains, typed actions,
 futures, scopes, cancellation, backpressure, statistics, and reusable shutdown.
-The same crate implements Phase C pinned remote objects, typed calls, roots,
-leases, resolver caching, colocation, transfer, and collection.
+The same crate implements Phase C remote objects and Phase D manual migration,
+including roots, leases, colocation, mobility, snapshots, epoch commit,
+redirects, rollback, forwarding, and retirement.
 
-Run the Phase A-C acceptance lanes with:
+Run the Phase A-D acceptance lanes with:
 
 ```bash
 scripts/check-runtime-foundation.sh
 scripts/check-phase-b-runtime.sh
 scripts/check-phase-c-objects.sh
+scripts/check-phase-d-migration.sh
 ```
 
-See the Phase A-C acceptance ledgers under `docs/` and
-[`docs/design/phase-c-objects.md`](docs/design/phase-c-objects.md).
+See the Phase A-D acceptance ledgers and design documents under `docs/`.
 
 ## Features
 

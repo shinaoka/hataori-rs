@@ -3,7 +3,7 @@
 The rustdoc for the `hataori` crate is published alongside this site:
 
 - [`hataori` crate documentation](hataori/index.html)
-- [`hataori-runtime` Phase B/C documentation](hataori_runtime/index.html)
+- [`hataori-runtime` Phase B-D documentation](hataori_runtime/index.html)
 
 It is built with `--features mpi,rayon`, so the MPI, hybrid, and Rayon items
 are all visible; feature-gated items are annotated with the feature that
@@ -18,7 +18,7 @@ enables them. The `rsmpi-rt` backend exposes the same items as `mpi`.
 | MPI and hybrid | `pmap`, `PmapOptions`, `PmapError`, `PmapErrorKind`, `Domain::sequential` |
 | Placement | `broadcast`, `scatter`, `gather`, `PlacementError`, `PlacementErrorKind` |
 | Common | `Domain`, `DomainId`, `LocalMode`, `Place`, `DomainAdmission`, `DomainBusy`, `NegativeRank`, `UnsupportedDomainId` |
-| Phase B/C runtime (unpublished) | `Runtime`, `RuntimeClient`, `Action`, `WireValue`, `RemoteFuture`, `RuntimeScope`, `DistributedObject`, `Remote`, `ObjectRoot`, `WeakRemote`, typed object actions, limits/stats |
+| Phase B-D runtime (unpublished) | `Runtime`, `RuntimeClient`, `Action`, `WireValue`, `RemoteFuture`, `RuntimeScope`, `DistributedObject`, `Remote`, `ObjectRoot`, `WeakRemote`, `MobileObject`, `MigrationFuture`, typed object actions, limits/stats |
 
 Build it locally with:
 

@@ -67,10 +67,13 @@ fn runtime_header_round_trips_every_kind() {
         RuntimeMessageKind::Cancel,
         RuntimeMessageKind::Cancelled,
         RuntimeMessageKind::DuplicateResultUnavailable,
+        RuntimeMessageKind::Moved,
     ] {
         let mut expected = message(kind);
         if kind == RuntimeMessageKind::Failure {
             expected.payload = vec![b"failed".to_vec()];
+        } else if kind == RuntimeMessageKind::Moved {
+            expected.payload = vec![vec![0; 32], vec![0; 32]];
         }
         assert_eq!(decode(parcel(expected.clone())).unwrap(), expected);
     }

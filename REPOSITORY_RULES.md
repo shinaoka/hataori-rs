@@ -14,8 +14,11 @@ rules loaded through `AGENTS.md`.
 - `docs/design/phase-b-runtime.md` describes the implemented unpublished Phase B
   lifecycle, typed-action, future, scope, deduplication, and shutdown boundary.
 - `docs/design/phase-c-objects.md` describes the implemented pinned-object,
-  directory/resolver, lease/root, typed object-action, and placement boundary;
-  it does not include migration or rebuilt algorithms.
+  directory/resolver, lease/root, typed object-action, and placement boundary.
+- `docs/design/phase-d-migration.md` describes implemented manual migration,
+  snapshot/restore, stable authority, epoch commit, redirect, rollback,
+  forwarding, retirement, and reconstructible-resource behavior; it does not
+  include automatic policy or rebuilt algorithms.
 - Do not present a future-runtime capability as implemented until source,
   runnable examples, and tests provide it.
 - Backward compatibility with the current P0 API is not a design requirement

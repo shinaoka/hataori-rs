@@ -309,3 +309,25 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Blocking findings: none
 - Non-blocking coverage findings fixed before submission: execute the upstream MPI-only smoke rather than compile it only; exercise prefetched batch size greater than one; assert a corrupt current ID leaves prefetched metadata and pending work unchanged.
 - Retained non-blocking notes: direct abort(75) conservatively covers a few no-successor cases, and the deterministic overlap handshake may have both adjacent callbacks waiting on the same task-transfer marker; neither weakens the contract.
+
+## Phase D explicit migration review record
+
+- Design: `docs/design/phase-d-migration.md`
+- Reviewer selected by the user: `reviewer-flash` (DeepSeek family, read-only,
+  `high`)
+- Review attempts: two 60-second bounded consultations. Both stopped during
+  evidence gathering before reading the complete design and produced **no
+  verdict**. Neither attempt is recorded as review-gate credit, and neither
+  reported a certified blocking finding.
+- Implementation owner: parent agent; no implementation was delegated while
+  the design lacked a reviewer verdict.
+- Parent preflight corrections before final validation: preserve a migration
+  lease pin; close admission behind placement tickets; prevent prepared-slot
+  collection during activation; release redirect dedup state before same-ID
+  retry; preserve authority lifetime across repeated migration; retire remote
+  residents after final lease/root release; recover dropped freezes by TTL;
+  reject snapshots that exceed protocol segment/byte limits.
+- Verification: `scripts/check-phase-d-migration.sh` plus Phase A-C/core/docs
+  regression lanes. See `phase-d-acceptance-ledger.md` and the Phase D worklog.
+- External verdict status: **NOT OBTAINED — reviewer timeout; no claim of an
+  independent Correct-to-merge verdict**.
