@@ -46,6 +46,8 @@ jobs:
         run: scripts/check-runtime-foundation.sh
       - name: Check Phase B runtime and structured execution
         run: scripts/check-phase-b-runtime.sh
+      - name: Check Phase C fixed-placement remote objects
+        run: scripts/check-phase-c-objects.sh
 
   tenferro-adapter:
     runs-on: ubuntu-latest

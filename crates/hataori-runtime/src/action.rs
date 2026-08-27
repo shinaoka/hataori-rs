@@ -34,6 +34,14 @@ impl std::fmt::Debug for RegisteredAction {
 }
 
 impl RegisteredAction {
+    pub(crate) fn new(
+        handler: impl Fn(Segments) -> Result<Segments, ActionError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            handler: Arc::new(handler),
+        }
+    }
+
     pub(crate) fn execute(&self, input: Segments) -> Result<Segments, ActionError> {
         match catch_unwind(AssertUnwindSafe(|| (self.handler)(input))) {
             Ok(result) => result,
@@ -72,6 +80,23 @@ impl ActionRegistry {
         );
         self.schemas
             .insert(id, (A::SCHEMA_ID, A::Output::SCHEMA_ID));
+        Ok(())
+    }
+
+    pub(crate) fn insert_erased(
+        &mut self,
+        id: ActionId,
+        input_schema: u64,
+        output_schema: u64,
+        handler: RegisteredAction,
+    ) -> Result<(), RuntimeError> {
+        if input_schema == 0 || output_schema == 0 {
+            return Err(RuntimeError::InvalidSchema);
+        }
+        if self.entries.insert(id, handler).is_some() {
+            return Err(RuntimeError::DuplicateAction(id));
+        }
+        self.schemas.insert(id, (input_schema, output_schema));
         Ok(())
     }
 

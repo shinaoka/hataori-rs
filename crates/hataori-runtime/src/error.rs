@@ -1,5 +1,5 @@
 use hataori_runtime_foundation::{
-    protocol::{ActionId, DomainId, LocalityId, RequestId},
+    protocol::{ActionId, DomainId, LocalityId, ObjectId, ObjectTypeId, RequestId},
     transport::TransportError,
 };
 use std::{fmt, time::Duration};
@@ -23,6 +23,13 @@ pub enum ResourceKind {
     DedupEntries,
     DedupBytes,
     SendTickets,
+    Objects,
+    ObjectMailbox,
+    ResolverEntries,
+    LocalityLeases,
+    ObjectRoots,
+    PlacementTickets,
+    LeaseTransfers,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +76,14 @@ pub enum RuntimeError {
     DuplicateAction(ActionId),
     UnknownAction(ActionId),
     UnknownDomain(DomainId),
+    DuplicateObjectType(ObjectTypeId),
+    UnknownObjectType(ObjectTypeId),
+    UnknownObject(ObjectId),
+    ObjectCollected(ObjectId),
+    StaleObjectLocation(ObjectId),
+    ObjectAction(String),
+    InvalidObjectTypeId,
+    InvalidObjectConcurrency,
     InvalidActionId,
     InvalidSchema,
     InvalidDeadline,
@@ -86,6 +101,19 @@ pub enum RuntimeError {
         request: RequestId,
         message: String,
     },
+    RemoteObject {
+        request: RequestId,
+        message: String,
+    },
+    Placement {
+        request: RequestId,
+        message: String,
+    },
+    Lease {
+        request: RequestId,
+        message: String,
+    },
+    LeaseTransferExpired(ObjectId),
     DuplicateResultUnavailable(RequestId),
     Protocol(String),
     Transport(TransportError),

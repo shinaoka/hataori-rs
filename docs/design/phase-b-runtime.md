@@ -76,8 +76,9 @@ dedup entries in bounded batches. `Runtime::block_on` is a minimal owner-thread
 future loop that polls the target future, calls bounded progress, and parks
 briefly when no progress was made. It is not a second async executor.
 
-Action handlers execute on fixed-size standard-library worker domains. Each
-domain has one bounded synchronous queue. Result capacity is sized from the
+Action handlers execute on fixed-size runtime-owned worker domains. Phase C
+backs those domains with dedicated Rayon pools while retaining Phase B's
+bounded admission and completion contract. Result capacity is sized from the
 validated total worker/queue bound, so a worker never needs an unbounded
 fallback. Handler panics are caught and converted to bounded typed action
 failures; Rust does not forcibly stop a handler already running.

@@ -1,6 +1,6 @@
 # Hataori distributed runtime architecture
 
-**Status:** Accepted long-term direction; Phase A protocol/transport and Phase B long-lived structured runtime implemented; phases C-E not implemented
+**Status:** Accepted long-term direction; phases A-C protocol, transport, structured runtime, and pinned remote objects implemented; phases D-E not implemented
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
@@ -32,11 +32,12 @@ documented in [`../design.md`](../design.md) and
 
 The unpublished `hataori-runtime-foundation` workspace crate implements the
 Phase A protocol, deterministic memory backend, TCP rendezvous/transport, and
-MPI transport described below. The unpublished `hataori-runtime` crate
-implements the Phase B owner-thread lifecycle, bounded worker domains, typed
-actions/futures, structured scopes, deadlines, cancellation, deduplication,
-observability, and shutdown described in [`phase-b-runtime.md`](phase-b-runtime.md).
-Remote objects, migration, and rebuilt algorithms remain unimplemented.
+MPI transport described below. The unpublished `hataori-runtime` crate implements the Phase B owner-thread
+lifecycle and structured execution described in
+[`phase-b-runtime.md`](phase-b-runtime.md), plus the Phase C pinned remote object,
+directory/resolver, lease/root, typed object-action, and collection boundary in
+[`phase-c-objects.md`](phase-c-objects.md). Migration and rebuilt algorithms
+remain unimplemented.
 
 The long-term system is a long-lived Rust distributed runtime. It should support:
 

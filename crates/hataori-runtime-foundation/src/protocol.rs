@@ -24,6 +24,84 @@ impl RunId {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ObjectId {
+    run: RunId,
+    unique: u128,
+}
+
+impl ObjectId {
+    pub fn new(run: RunId, unique: u128) -> Result<Self, ProtocolError> {
+        (unique != 0)
+            .then_some(Self { run, unique })
+            .ok_or(ProtocolError::ZeroId("ObjectId.unique"))
+    }
+
+    pub const fn run(self) -> RunId {
+        self.run
+    }
+
+    pub const fn unique(self) -> u128 {
+        self.unique
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ObjectLocation {
+    locality: LocalityId,
+    domain: DomainId,
+    slot: u64,
+    generation: u32,
+    epoch: u64,
+}
+
+impl ObjectLocation {
+    pub fn new(
+        locality: LocalityId,
+        domain: DomainId,
+        slot: u64,
+        generation: u32,
+        epoch: u64,
+    ) -> Result<Self, ProtocolError> {
+        if slot == 0 {
+            return Err(ProtocolError::ZeroId("ObjectLocation.slot"));
+        }
+        if generation == 0 {
+            return Err(ProtocolError::ZeroId("ObjectLocation.generation"));
+        }
+        if epoch == 0 {
+            return Err(ProtocolError::ZeroId("ObjectLocation.epoch"));
+        }
+        Ok(Self {
+            locality,
+            domain,
+            slot,
+            generation,
+            epoch,
+        })
+    }
+
+    pub const fn locality(self) -> LocalityId {
+        self.locality
+    }
+
+    pub const fn domain(self) -> DomainId {
+        self.domain
+    }
+
+    pub const fn slot(self) -> u64 {
+        self.slot
+    }
+
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
+
+    pub const fn epoch(self) -> u64 {
+        self.epoch
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LocalityId(u64);
 
 impl LocalityId {

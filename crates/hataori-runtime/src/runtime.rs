@@ -3,22 +3,31 @@ use crate::{
     dedup::{DedupDisposition, DedupTable},
     domain::{ActionCompletion, ActionJob, DomainConfig, DomainRegistry, DomainStats},
     error::{cap, ResourceKind, RuntimeError, RuntimeState},
+    object::{
+        create_action_id, ColocatedFuture, CreateFuture, DistributedObject, LeaseTransfer,
+        LocalLeaseManager, ObjectCallFuture, ObjectEnvelope, ObjectLimits, ObjectReadAction,
+        ObjectRegistry, ObjectService, ObjectStats, ObjectWriteAction, PlacementFallback,
+        PlacementFuture, Remote, RootedCreateFuture, TransferFuture, UpgradeFuture, WeakRemote,
+        LEASE_ACQUIRE_ACTION_ID, LEASE_RELEASE_ACTION_ID, LEASE_RENEW_ACTION_ID,
+        ROOT_RELEASE_ACTION_ID, TRANSFER_ACK_ACTION_ID,
+    },
     pending::{PendingEntry, PendingTable, Promise, RemoteFuture},
     wire::{self, RuntimeMessage, RuntimeMessageKind},
+    WireValue,
 };
 use hataori_runtime_foundation::{
     protocol::{
-        ActionId, Channel, DomainId, Hello, LocalityId, MessageId, Parcel, ParcelKind,
-        ProtocolLimits, RequestId, RunId, RuntimeVersion, TraceId,
+        ActionId, Channel, DomainId, Hello, LocalityId, MessageId, ObjectId, ObjectTypeId, Parcel,
+        ParcelKind, ProtocolLimits, RequestId, RunId, RuntimeVersion, TraceId,
     },
     transport::{SendTicket, TransportDriver, TransportEvent, TransportHandle, TransportStats},
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     future::Future,
     pin::pin,
     sync::{
-        atomic::{AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
         Arc, Mutex,
     },
@@ -126,6 +135,7 @@ pub struct RuntimeStats {
     pub send_tickets: usize,
     pub queued_responses: usize,
     pub queued_response_bytes: usize,
+    pub objects: ObjectStats,
     pub transport: TransportStats,
 }
 
@@ -139,11 +149,85 @@ pub struct RuntimeBuilder {
     protocol_limits: ProtocolLimits,
     runtime_limits: RuntimeLimits,
     registry: ActionRegistry,
+    object_registry: ObjectRegistry,
+    object_limits: ObjectLimits,
     domains: Vec<DomainConfig>,
     sealed: bool,
 }
 
 impl RuntimeBuilder {
+    pub fn object_limits(&mut self, limits: ObjectLimits) -> Result<&mut Self, RuntimeError> {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        self.object_limits = limits.validate()?;
+        Ok(self)
+    }
+
+    pub fn register_object_exclusive<T: DistributedObject>(
+        &mut self,
+    ) -> Result<&mut Self, RuntimeError> {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        let object_type =
+            ObjectTypeId::new(T::TYPE_ID).map_err(|_| RuntimeError::InvalidObjectTypeId)?;
+        let create = create_action_id(object_type)?;
+        if self.registry.get(create).is_some() {
+            return Err(RuntimeError::DuplicateAction(create));
+        }
+        self.object_registry.register_exclusive::<T>()?;
+        Ok(self)
+    }
+
+    pub fn register_object_read_write<T: DistributedObject + Sync>(
+        &mut self,
+    ) -> Result<&mut Self, RuntimeError> {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        let object_type =
+            ObjectTypeId::new(T::TYPE_ID).map_err(|_| RuntimeError::InvalidObjectTypeId)?;
+        let create = create_action_id(object_type)?;
+        if self.registry.get(create).is_some() {
+            return Err(RuntimeError::DuplicateAction(create));
+        }
+        self.object_registry.register_read_write::<T>()?;
+        Ok(self)
+    }
+
+    pub fn register_object_read<T, A>(&mut self) -> Result<&mut Self, RuntimeError>
+    where
+        T: DistributedObject + Sync,
+        A: ObjectReadAction<T>,
+    {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        let id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
+        if self.registry.get(id).is_some() {
+            return Err(RuntimeError::DuplicateAction(id));
+        }
+        self.object_registry.register_read::<T, A>()?;
+        Ok(self)
+    }
+
+    pub fn register_object_write<T, A>(&mut self) -> Result<&mut Self, RuntimeError>
+    where
+        T: DistributedObject,
+        A: ObjectWriteAction<T>,
+    {
+        if self.sealed {
+            return Err(RuntimeError::BuilderSealed);
+        }
+        let id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
+        if self.registry.get(id).is_some() {
+            return Err(RuntimeError::DuplicateAction(id));
+        }
+        self.object_registry.register_write::<T, A>()?;
+        Ok(self)
+    }
+
     pub fn register<A, F>(&mut self, handler: F) -> Result<&mut Self, RuntimeError>
     where
         A: Action,
@@ -151,6 +235,10 @@ impl RuntimeBuilder {
     {
         if self.sealed {
             return Err(RuntimeError::BuilderSealed);
+        }
+        let id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
+        if self.object_registry.reserves_action(id) {
+            return Err(RuntimeError::DuplicateAction(id));
         }
         self.registry.register::<A, F>(handler)?;
         Ok(self)
@@ -183,8 +271,8 @@ impl RuntimeBuilder {
             run_id: self.run_id,
             runtime_version: RUNTIME_VERSION,
             action_registry_hash: self.registry.fingerprint(),
-            object_registry_hash: [0; 32],
-            capabilities: 1,
+            object_registry_hash: self.object_registry.fingerprint(),
+            capabilities: 0b11,
             limits: self.protocol_limits.validate().map_err(|error| {
                 RuntimeError::Protocol(format!("invalid protocol limits: {error}"))
             })?,
@@ -209,12 +297,20 @@ impl RuntimeBuilder {
                 ..DomainConfig::default()
             });
         }
+        let objects = Arc::new(ObjectService::new(
+            self.run_id,
+            local_id,
+            self.object_limits,
+            self.object_registry.clone(),
+        ));
+        self.object_registry.install(&objects, &mut self.registry)?;
         let completion_capacity = self
             .runtime_limits
             .max_pending_calls
             .checked_add(self.runtime_limits.max_dedup_entries)
             .ok_or(RuntimeError::InvalidLimits("completion capacity overflow"))?;
         let domains = DomainRegistry::new(&self.domains, completion_capacity)?;
+        let domain_pools = domains.pools();
         let (local_tx, local_rx) = mpsc::sync_channel(self.runtime_limits.max_pending_calls);
         let state = Arc::new(AtomicU8::new(RuntimeState::Bootstrapping as u8));
         let shared = Arc::new(Shared {
@@ -225,12 +321,20 @@ impl RuntimeBuilder {
             protocol_limits: self.protocol_limits,
             transport: Arc::new(handle),
             registry: Arc::new(self.registry),
+            objects: Arc::clone(&objects),
+            domain_pools,
+            local_leases: LocalLeaseManager::new(
+                self.object_limits.max_local_leases,
+                self.object_limits.lease_renew_interval,
+            ),
             pending: Arc::new(PendingTable::new(self.runtime_limits.max_pending_calls)),
             local_tx,
             next_request: AtomicU64::new(1),
+            next_object: AtomicU64::new(1),
             next_message: AtomicU64::new(1),
             tickets: Mutex::new(HashMap::new()),
             work_gate: Mutex::new(()),
+            local_object_calls: AtomicUsize::new(0),
             counters: SharedCounters::default(),
         });
         state.store(RuntimeState::Running as u8, Ordering::Release);
@@ -246,6 +350,7 @@ impl RuntimeBuilder {
             ),
             responses: VecDeque::new(),
             response_bytes: 0,
+            objects,
         })
     }
 }
@@ -260,6 +365,14 @@ struct SharedCounters {
     action_failures: AtomicU64,
     sent: [AtomicU64; 3],
     received: [AtomicU64; 3],
+}
+
+struct LocalObjectCall<'a>(&'a AtomicUsize);
+
+impl Drop for LocalObjectCall<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 enum TicketPurpose {
@@ -282,12 +395,17 @@ struct Shared {
     protocol_limits: ProtocolLimits,
     transport: Arc<dyn TransportHandle>,
     registry: Arc<ActionRegistry>,
+    objects: Arc<ObjectService>,
+    domain_pools: BTreeMap<DomainId, Arc<rayon::ThreadPool>>,
+    local_leases: LocalLeaseManager,
     pending: Arc<PendingTable>,
     local_tx: SyncSender<LocalRequest>,
     next_request: AtomicU64,
+    next_object: AtomicU64,
     next_message: AtomicU64,
     tickets: Mutex<HashMap<SendTicket, TicketPurpose>>,
     work_gate: Mutex<()>,
+    local_object_calls: AtomicUsize,
     counters: SharedCounters,
 }
 
@@ -322,6 +440,21 @@ impl Shared {
             })?;
         RequestId::new(self.local_id, sequence)
             .map_err(|_| RuntimeError::Protocol("request id overflow".into()))
+    }
+
+    fn next_object(&self) -> Result<ObjectId, RuntimeError> {
+        let sequence = self
+            .next_object
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1).filter(|next| *next != 0)
+            })
+            .map_err(|_| RuntimeError::ResourceExhausted {
+                resource: ResourceKind::Objects,
+                limit: self.objects.limits.max_objects,
+            })?;
+        let unique = (u128::from(self.local_id.get()) << 64) | u128::from(sequence);
+        ObjectId::new(self.run_id, unique)
+            .map_err(|_| RuntimeError::Protocol("object id overflow".into()))
     }
 
     fn next_message(&self) -> Result<MessageId, RuntimeError> {
@@ -451,23 +584,113 @@ impl RuntimeClient {
         )
     }
 
+    pub fn spawn_colocated<T: DistributedObject, A: Action>(
+        &self,
+        remote: &Remote<T>,
+        action: A,
+    ) -> Result<ColocatedFuture<A::Output>, RuntimeError> {
+        let location = self
+            .shared
+            .objects
+            .resolve(remote.object)
+            .unwrap_or(remote.location);
+        let ticket = self
+            .shared
+            .objects
+            .placement_ticket(Arc::clone(&remote.lease))?;
+        let future = self.spawn_on(Place::new(location.locality(), location.domain()), action)?;
+        Ok(ColocatedFuture::new(future, ticket))
+    }
+
+    pub fn spawn_preferred_colocated<T, A>(
+        &self,
+        remote: &Remote<T>,
+        fallback: PlacementFallback,
+        action: A,
+    ) -> Result<PlacementFuture<A::Output>, RuntimeError>
+    where
+        T: DistributedObject,
+        A: Action,
+    {
+        let location = self
+            .shared
+            .objects
+            .resolve(remote.object)
+            .unwrap_or(remote.location);
+        let action_id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
+        let payload = action
+            .encode()
+            .map_err(|error| RuntimeError::Protocol(format!("action encode failed: {error}")))?;
+        let options = SpawnOptions {
+            deadline: self.shared.limits.default_deadline,
+            trace_id: None,
+        };
+        let ticket = match self
+            .shared
+            .objects
+            .placement_ticket(Arc::clone(&remote.lease))
+        {
+            Ok(ticket) => ticket,
+            Err(error @ RuntimeError::ResourceExhausted { .. }) => {
+                let place = match fallback {
+                    PlacementFallback::Any => Place::new(self.shared.local_id, DomainId::DEFAULT),
+                    PlacementFallback::Place(place) => place,
+                    PlacementFallback::Reject => return Err(error),
+                };
+                let future = self.spawn_encoded(place, action_id, payload, options)?;
+                return Ok(PlacementFuture::fallback(
+                    future,
+                    fallback,
+                    self.clone(),
+                    action_id,
+                    options,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let preferred = self.spawn_encoded(
+            Place::new(location.locality(), location.domain()),
+            action_id,
+            payload.clone(),
+            options,
+        )?;
+        Ok(PlacementFuture::new(
+            ColocatedFuture::new(preferred, ticket),
+            fallback,
+            self.clone(),
+            action_id,
+            payload,
+            options,
+        ))
+    }
+
     pub fn spawn_on_with<A: Action>(
         &self,
         place: Place,
         action: A,
         options: SpawnOptions,
     ) -> Result<RemoteFuture<A::Output>, RuntimeError> {
+        let action_id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
+        let payload = action
+            .encode()
+            .map_err(|error| RuntimeError::Protocol(format!("action encode failed: {error}")))?;
+        self.spawn_encoded(place, action_id, payload, options)
+    }
+
+    pub(crate) fn spawn_encoded<T: WireValue>(
+        &self,
+        place: Place,
+        action_id: ActionId,
+        payload: Segments,
+        options: SpawnOptions,
+    ) -> Result<RemoteFuture<T>, RuntimeError> {
         self.shared.ensure_running()?;
         if options.deadline.is_zero() {
             return Err(RuntimeError::InvalidDeadline);
         }
-        let action_id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
         if self.shared.registry.get(action_id).is_none() {
             return Err(RuntimeError::UnknownAction(action_id));
         }
-        let payload = action
-            .encode()
-            .map_err(|error| RuntimeError::Protocol(format!("action encode failed: {error}")))?;
         let deadline_ms = u64::try_from(options.deadline.as_millis().max(1))
             .map_err(|_| RuntimeError::InvalidDeadline)?;
         let _gate = self.shared.work_gate.lock().unwrap();
@@ -538,6 +761,400 @@ impl RuntimeClient {
         ))
     }
 
+    pub fn create_at<T: DistributedObject>(
+        &self,
+        place: Place,
+        state: T,
+    ) -> Result<CreateFuture<T>, RuntimeError> {
+        self.create_at_inner(place, state, false)
+    }
+
+    pub fn create_rooted_at<T: DistributedObject>(
+        &self,
+        place: Place,
+        state: T,
+    ) -> Result<RootedCreateFuture<T>, RuntimeError> {
+        Ok(RootedCreateFuture::new(
+            self.create_at_inner(place, state, true)?,
+        ))
+    }
+
+    fn create_at_inner<T: DistributedObject>(
+        &self,
+        place: Place,
+        state: T,
+        rooted: bool,
+    ) -> Result<CreateFuture<T>, RuntimeError> {
+        let object_type =
+            ObjectTypeId::new(T::TYPE_ID).map_err(|_| RuntimeError::InvalidObjectTypeId)?;
+        let object = self.shared.next_object()?;
+        if place.locality == self.shared.local_id {
+            let location = self.shared.objects.create_local(
+                object,
+                object_type,
+                place.domain,
+                state,
+                self.shared.local_id,
+                rooted,
+            )?;
+            let remote = self.attach_object(object, object_type, location);
+            return Ok(CreateFuture::ready(
+                remote,
+                object,
+                object_type,
+                self.clone(),
+            ));
+        }
+        let payload = state
+            .encode()
+            .map_err(|error| RuntimeError::Protocol(format!("object encode failed: {error}")))?;
+        let payload = ObjectEnvelope {
+            object,
+            object_type,
+            epoch: 1,
+            lease_locality: self.shared.local_id,
+            domain: place.domain,
+            rooted,
+        }
+        .encode(payload);
+        let future = self.spawn_encoded::<Vec<u8>>(
+            place,
+            create_action_id(object_type)?,
+            payload,
+            SpawnOptions {
+                deadline: self.shared.limits.default_deadline,
+                trace_id: None,
+            },
+        )?;
+        Ok(CreateFuture::new(future, object, object_type, self.clone()))
+    }
+
+    fn run_local_object<O: Send>(
+        &self,
+        domain: DomainId,
+        call: impl FnOnce() -> Result<O, RuntimeError> + Send,
+    ) -> Result<O, RuntimeError> {
+        let gate = self.shared.work_gate.lock().unwrap();
+        self.shared.ensure_running()?;
+        self.shared
+            .local_object_calls
+            .fetch_add(1, Ordering::AcqRel);
+        let _active = LocalObjectCall(&self.shared.local_object_calls);
+        let pool = self
+            .shared
+            .domain_pools
+            .get(&domain)
+            .cloned()
+            .ok_or(RuntimeError::UnknownDomain(domain))?;
+        drop(gate);
+        pool.install(call)
+    }
+
+    pub fn call_object_read<T, A>(
+        &self,
+        remote: &Remote<T>,
+        action: A,
+    ) -> Result<ObjectCallFuture<A::Output>, RuntimeError>
+    where
+        T: DistributedObject + Sync,
+        A: ObjectReadAction<T>,
+    {
+        if remote.location.locality() == self.shared.local_id {
+            let object = remote.object;
+            let object_type = remote.object_type;
+            let location = remote.location;
+            let objects = Arc::clone(&self.shared.objects);
+            return Ok(ObjectCallFuture::Local(Some(
+                self.run_local_object(location.domain(), move || {
+                    objects.call_read_local(object, object_type, location, action)
+                }),
+            )));
+        }
+        let payload = action.encode().map_err(|error| {
+            RuntimeError::Protocol(format!("object action encode failed: {error}"))
+        })?;
+        self.call_object(remote, A::ID, payload)
+            .map(ObjectCallFuture::Remote)
+    }
+
+    pub fn call_object_write<T, A>(
+        &self,
+        remote: &Remote<T>,
+        action: A,
+    ) -> Result<ObjectCallFuture<A::Output>, RuntimeError>
+    where
+        T: DistributedObject,
+        A: ObjectWriteAction<T>,
+    {
+        if remote.location.locality() == self.shared.local_id {
+            let object = remote.object;
+            let object_type = remote.object_type;
+            let location = remote.location;
+            let objects = Arc::clone(&self.shared.objects);
+            return Ok(ObjectCallFuture::Local(Some(
+                self.run_local_object(location.domain(), move || {
+                    objects.call_write_local(object, object_type, location, action)
+                }),
+            )));
+        }
+        let payload = action.encode().map_err(|error| {
+            RuntimeError::Protocol(format!("object action encode failed: {error}"))
+        })?;
+        self.call_object(remote, A::ID, payload)
+            .map(ObjectCallFuture::Remote)
+    }
+
+    fn call_object<T: DistributedObject, O: WireValue>(
+        &self,
+        remote: &Remote<T>,
+        raw_action: u128,
+        payload: Segments,
+    ) -> Result<RemoteFuture<O>, RuntimeError> {
+        let action = ActionId::new(raw_action).map_err(|_| RuntimeError::InvalidActionId)?;
+        let location = self
+            .shared
+            .objects
+            .resolve(remote.object)
+            .unwrap_or(remote.location);
+        let payload = ObjectEnvelope {
+            object: remote.object,
+            object_type: remote.object_type,
+            epoch: location.epoch(),
+            lease_locality: self.shared.local_id,
+            domain: location.domain(),
+            rooted: false,
+        }
+        .encode(payload);
+        self.spawn_encoded(
+            Place::new(location.locality(), location.domain()),
+            action,
+            payload,
+            SpawnOptions {
+                deadline: self.shared.limits.default_deadline,
+                trace_id: None,
+            },
+        )
+    }
+
+    pub fn transfer_object<T: DistributedObject>(
+        &self,
+        remote: &Remote<T>,
+        destination: LocalityId,
+    ) -> Result<TransferFuture<T>, RuntimeError> {
+        let payload = ObjectEnvelope {
+            object: remote.object,
+            object_type: remote.object_type,
+            epoch: remote.location.epoch(),
+            lease_locality: destination,
+            domain: remote.location.domain(),
+            rooted: true,
+        }
+        .encode(Vec::new());
+        let inner = self.spawn_encoded::<()>(
+            Place::new(remote.location.locality(), remote.location.domain()),
+            ActionId::new(LEASE_ACQUIRE_ACTION_ID).unwrap(),
+            payload,
+            SpawnOptions {
+                deadline: self.shared.limits.default_deadline,
+                trace_id: None,
+            },
+        )?;
+        Ok(TransferFuture::new(
+            inner,
+            remote.object,
+            remote.object_type,
+            remote.location,
+            destination,
+            Instant::now() + self.shared.objects.limits.lease_ttl,
+            self.clone(),
+        ))
+    }
+
+    pub fn import_transfer<T: DistributedObject>(
+        &self,
+        mut transfer: LeaseTransfer<T>,
+    ) -> Result<Remote<T>, RuntimeError> {
+        if transfer.destination != self.shared.local_id {
+            return Err(RuntimeError::InvalidMembership(transfer.destination));
+        }
+        if transfer.expires_at <= Instant::now() {
+            return Err(RuntimeError::LeaseTransferExpired(transfer.object));
+        }
+        let remote =
+            self.attach_object(transfer.object, transfer.object_type, transfer.location)?;
+        transfer.active = false;
+        self.object_control(
+            transfer.object,
+            transfer.object_type,
+            transfer.location,
+            transfer.destination,
+            TRANSFER_ACK_ACTION_ID,
+        );
+        Ok(remote)
+    }
+
+    pub fn upgrade_object<T: DistributedObject>(
+        &self,
+        weak: &WeakRemote<T>,
+    ) -> Result<UpgradeFuture<T>, RuntimeError> {
+        let payload = ObjectEnvelope {
+            object: weak.object,
+            object_type: weak.object_type,
+            epoch: weak.location.epoch(),
+            lease_locality: self.shared.local_id,
+            domain: weak.location.domain(),
+            rooted: false,
+        }
+        .encode(Vec::new());
+        let inner = self.spawn_encoded::<()>(
+            Place::new(weak.location.locality(), weak.location.domain()),
+            ActionId::new(LEASE_ACQUIRE_ACTION_ID).unwrap(),
+            payload,
+            SpawnOptions {
+                deadline: self.shared.limits.default_deadline,
+                trace_id: None,
+            },
+        )?;
+        Ok(UpgradeFuture::new(
+            inner,
+            weak.object,
+            weak.object_type,
+            weak.location,
+            self.clone(),
+        ))
+    }
+
+    pub(crate) fn attach_object<T: DistributedObject>(
+        &self,
+        object: ObjectId,
+        object_type: ObjectTypeId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+    ) -> Result<Remote<T>, RuntimeError> {
+        self.shared.objects.cache_location(object, location);
+        self.shared
+            .local_leases
+            .attach(object, object_type, location, self.clone())
+    }
+
+    pub(crate) fn renew_object(
+        &self,
+        object: ObjectId,
+        object_type: ObjectTypeId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+    ) {
+        self.object_control(
+            object,
+            object_type,
+            location,
+            self.shared.local_id,
+            LEASE_RENEW_ACTION_ID,
+        );
+    }
+
+    pub(crate) fn release_object(
+        &self,
+        object: ObjectId,
+        object_type: ObjectTypeId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+    ) {
+        self.object_control(
+            object,
+            object_type,
+            location,
+            self.shared.local_id,
+            LEASE_RELEASE_ACTION_ID,
+        );
+    }
+
+    pub(crate) fn release_root(
+        &self,
+        object: ObjectId,
+        object_type: ObjectTypeId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+    ) {
+        self.object_control(
+            object,
+            object_type,
+            location,
+            self.shared.local_id,
+            ROOT_RELEASE_ACTION_ID,
+        );
+    }
+
+    pub(crate) fn release_for_locality(
+        &self,
+        object: ObjectId,
+        object_type: ObjectTypeId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+        locality: LocalityId,
+    ) {
+        self.object_control(
+            object,
+            object_type,
+            location,
+            locality,
+            LEASE_RELEASE_ACTION_ID,
+        );
+    }
+
+    fn object_control(
+        &self,
+        object: ObjectId,
+        object_type: ObjectTypeId,
+        location: hataori_runtime_foundation::protocol::ObjectLocation,
+        lease_locality: LocalityId,
+        raw_action: u128,
+    ) {
+        if location.locality() == self.shared.local_id {
+            match raw_action {
+                LEASE_RENEW_ACTION_ID => {
+                    self.shared
+                        .objects
+                        .renew(object, lease_locality, Instant::now());
+                }
+                ROOT_RELEASE_ACTION_ID => {
+                    self.shared.objects.release_root(object);
+                }
+                TRANSFER_ACK_ACTION_ID => {
+                    self.shared.objects.ack_transfer(object, lease_locality);
+                }
+                _ => {
+                    self.shared.objects.release(object, lease_locality);
+                }
+            }
+            return;
+        }
+        let Ok(request) = self.shared.next_request() else {
+            return;
+        };
+        let Ok(action) = ActionId::new(raw_action) else {
+            return;
+        };
+        let message = RuntimeMessage {
+            kind: RuntimeMessageKind::Request,
+            request,
+            action,
+            domain: location.domain(),
+            deadline_ms: u64::try_from(self.shared.limits.default_deadline.as_millis().max(1))
+                .unwrap_or(u64::MAX),
+            payload: ObjectEnvelope {
+                object,
+                object_type,
+                epoch: location.epoch(),
+                lease_locality,
+                domain: location.domain(),
+                rooted: false,
+            }
+            .encode(Vec::new()),
+        };
+        let _ = self.shared.send(
+            location.locality(),
+            message,
+            TicketPurpose::BestEffort,
+            None,
+        );
+    }
+
     pub(crate) fn cancel(&self, request: RequestId) {
         self.shared.cancel(request);
     }
@@ -559,6 +1176,7 @@ pub struct Runtime {
     dedup: DedupTable,
     responses: VecDeque<QueuedResponse>,
     response_bytes: usize,
+    objects: Arc<ObjectService>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -609,6 +1227,8 @@ impl Runtime {
             protocol_limits,
             runtime_limits: runtime_limits.validate()?,
             registry: ActionRegistry::default(),
+            object_registry: ObjectRegistry::default(),
+            object_limits: ObjectLimits::default(),
             domains: Vec::new(),
             sealed: false,
         })
@@ -645,6 +1265,45 @@ impl Runtime {
         self.client().spawn_on_with(place, action, options)
     }
 
+    /// Creates a pinned object at an exact logical place.
+    ///
+    /// # Errors
+    /// Returns a typed registry, placement, codec, resource, transport, or
+    /// shutdown error before retaining an unowned object.
+    pub fn create_at<T: DistributedObject>(
+        &self,
+        place: Place,
+        state: T,
+    ) -> Result<CreateFuture<T>, RuntimeError> {
+        self.client().create_at(place, state)
+    }
+
+    /// Creates an exact pinned object and one runtime-owned root.
+    ///
+    /// # Errors
+    /// Returns a typed registry, placement, codec, resource, transport, or
+    /// shutdown error before retaining an unowned root.
+    pub fn create_rooted_at<T: DistributedObject>(
+        &self,
+        place: Place,
+        state: T,
+    ) -> Result<RootedCreateFuture<T>, RuntimeError> {
+        self.client().create_rooted_at(place, state)
+    }
+
+    /// Spawns an independent action at an object's pinned location.
+    ///
+    /// # Errors
+    /// Returns a typed resolver, placement-ticket, queue, transport, codec, or
+    /// shutdown error.
+    pub fn spawn_colocated<T: DistributedObject, A: Action>(
+        &self,
+        remote: &Remote<T>,
+        action: A,
+    ) -> Result<ColocatedFuture<A::Output>, RuntimeError> {
+        self.client().spawn_colocated(remote, action)
+    }
+
     pub fn progress(&mut self, max_events: usize) -> Result<RuntimeProgress, RuntimeError> {
         let state = self.state();
         if !matches!(state, RuntimeState::Running | RuntimeState::Draining) {
@@ -659,6 +1318,11 @@ impl Runtime {
         }
         self.expire_pending();
         self.dedup.expire(Instant::now());
+        let now = Instant::now();
+        for lease in self.shared.local_leases.due(now) {
+            lease.renew();
+        }
+        self.objects.expire(now);
         let mut events = Vec::new();
         let transport = self.driver.progress(&mut events, limit).map_err(|error| {
             self.fail(RuntimeError::Transport(error.clone()));
@@ -681,6 +1345,15 @@ impl Runtime {
                 return Err(error);
             }
             handled += 1;
+        }
+        if handled < limit {
+            let ready = self
+                .objects
+                .retry_ready(limit - handled, |domain| self.domains.can_submit(domain));
+            for job in ready {
+                self.domains.submit(job)?;
+                handled += 1;
+            }
         }
         while handled < limit {
             match self.local_rx.try_recv() {
@@ -759,6 +1432,7 @@ impl Runtime {
             send_tickets: self.shared.tickets.lock().unwrap().len(),
             queued_responses: self.responses.len(),
             queued_response_bytes: self.response_bytes,
+            objects: self.objects.stats(Instant::now()),
             transport: self.driver.stats(),
         }
     }
@@ -780,6 +1454,7 @@ impl Runtime {
         self.shared
             .state
             .store(RuntimeState::Draining as u8, Ordering::Release);
+        self.shared.local_leases.clear();
         for (request, entry) in self.shared.pending.drain() {
             entry.promise.complete(Err(RuntimeError::Shutdown));
             if let Some(token) = entry.cancel_token {
@@ -807,7 +1482,13 @@ impl Runtime {
         }
         drop(work_gate);
         let deadline = Instant::now() + self.shared.limits.shutdown_timeout;
-        while !self.domains.idle() {
+        while {
+            let objects = self.objects.stats(Instant::now());
+            !self.domains.idle()
+                || objects.queued_calls != 0
+                || objects.in_flight_calls != 0
+                || self.shared.local_object_calls.load(Ordering::Acquire) != 0
+        } {
             self.progress(self.shared.limits.max_progress_events)?;
             if Instant::now() >= deadline {
                 self.shared
@@ -831,6 +1512,7 @@ impl Runtime {
         }
         self.domains.stop();
         self.dedup.clear();
+        self.objects.clear_all();
         let mut events = Vec::new();
         self.driver.shutdown(
             &mut events,
@@ -882,6 +1564,7 @@ impl Runtime {
                     cancelled: request.cancel_token,
                     local: true,
                     submitted_at: Instant::now(),
+                    object: None,
                 })
             });
         if let Err(error) = result {
@@ -947,10 +1630,34 @@ impl Runtime {
             RuntimeMessageKind::Failure => self.complete_pending(source, message, |message| {
                 let text = String::from_utf8(message.payload.into_iter().next().unwrap())
                     .map_err(|_| RuntimeError::Protocol("remote error is not UTF-8".into()))?;
-                Err(RuntimeError::RemoteAction {
-                    request: message.request,
-                    message: cap(text),
-                })
+                let message_text = cap(text);
+                let category = message_text.to_ascii_lowercase();
+                let error = if category.contains("placement")
+                    || category.contains("admission")
+                    || category.contains("actionqueue")
+                    || category.contains("objectmailbox")
+                {
+                    RuntimeError::Placement {
+                        request: message.request,
+                        message: message_text,
+                    }
+                } else if category.contains("object") {
+                    RuntimeError::RemoteObject {
+                        request: message.request,
+                        message: message_text,
+                    }
+                } else if category.contains("lease") || category.contains("transfer") {
+                    RuntimeError::Lease {
+                        request: message.request,
+                        message: message_text,
+                    }
+                } else {
+                    RuntimeError::RemoteAction {
+                        request: message.request,
+                        message: message_text,
+                    }
+                };
+                Err(error)
             }),
             RuntimeMessageKind::Cancelled => self.complete_pending(source, message, |message| {
                 Err(RuntimeError::Cancelled(message.request))
@@ -987,7 +1694,7 @@ impl Runtime {
                         trace_id,
                     );
                 };
-                if let Err(error) = self.domains.submit(ActionJob {
+                let job = ActionJob {
                     requester: source,
                     request: message.request,
                     action_id: message.action,
@@ -998,7 +1705,27 @@ impl Runtime {
                     cancelled,
                     local: false,
                     submitted_at: Instant::now(),
-                }) {
+                    object: None,
+                };
+                let admitted = self.objects.admit(
+                    message.action,
+                    job,
+                    self.domains.can_submit(message.domain),
+                );
+                let Some(job) = (match admitted {
+                    Ok(job) => job,
+                    Err(error) => {
+                        return self.send_and_cache_failure(
+                            source,
+                            message,
+                            &error.to_string(),
+                            trace_id,
+                        );
+                    }
+                }) else {
+                    return Ok(());
+                };
+                if let Err(error) = self.domains.submit(job) {
                     return self.send_and_cache_failure(
                         source,
                         message,
@@ -1031,6 +1758,17 @@ impl Runtime {
     }
 
     fn handle_completion(&mut self, completion: ActionCompletion) -> Result<(), RuntimeError> {
+        if let Some(object) = completion.object {
+            for job in self.objects.complete(object) {
+                let admitted = job.object;
+                if let Err(error) = self.domains.submit(job) {
+                    if let Some(admitted) = admitted {
+                        self.objects.rollback(admitted);
+                    }
+                    return Err(error);
+                }
+            }
+        }
         if completion.local {
             let entry = self.shared.pending.take_checked(
                 completion.request,
@@ -1296,6 +2034,7 @@ impl Drop for Runtime {
             self.shared
                 .state
                 .store(RuntimeState::Draining as u8, Ordering::Release);
+            self.shared.local_leases.clear();
             for (_, entry) in self.shared.pending.drain() {
                 entry.promise.complete(Err(RuntimeError::Shutdown));
                 if let Some(token) = entry.cancel_token {

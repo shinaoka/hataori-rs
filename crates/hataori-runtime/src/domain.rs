@@ -2,15 +2,17 @@ use crate::{
     action::{RegisteredAction, Segments},
     error::{ActionError, ResourceKind, RuntimeError},
 };
-use hataori_runtime_foundation::protocol::{ActionId, DomainId, LocalityId, RequestId, TraceId};
+use hataori_runtime_foundation::protocol::{
+    ActionId, DomainId, LocalityId, ObjectId, RequestId, TraceId,
+};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender},
+        Arc,
     },
-    thread::JoinHandle,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +45,12 @@ pub struct DomainStats {
     pub max_execution_ns: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ObjectJob {
+    pub object: ObjectId,
+    pub read: bool,
+}
+
 pub(crate) struct ActionJob {
     pub requester: LocalityId,
     pub request: RequestId,
@@ -54,6 +62,7 @@ pub(crate) struct ActionJob {
     pub cancelled: Arc<AtomicBool>,
     pub local: bool,
     pub submitted_at: std::time::Instant,
+    pub object: Option<ObjectJob>,
 }
 
 pub(crate) struct ActionCompletion {
@@ -65,11 +74,7 @@ pub(crate) struct ActionCompletion {
     pub result: Result<Segments, ActionError>,
     pub cancelled: bool,
     pub local: bool,
-}
-
-enum WorkerMessage {
-    Run(ActionJob),
-    Stop,
+    pub object: Option<ObjectJob>,
 }
 
 struct DomainCounters {
@@ -106,9 +111,9 @@ impl DomainCounters {
 }
 
 struct DomainExecutor {
-    sender: SyncSender<WorkerMessage>,
+    pool: Arc<ThreadPool>,
+    completions: SyncSender<ActionCompletion>,
     counters: Arc<DomainCounters>,
-    workers: Vec<JoinHandle<()>>,
     queue_capacity: usize,
 }
 
@@ -133,40 +138,30 @@ impl DomainRegistry {
             if domains.contains_key(&config.id) {
                 return Err(RuntimeError::InvalidLimits("duplicate domain id"));
             }
-            let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
-            let receiver = Arc::new(Mutex::new(receiver));
-            let counters = Arc::new(DomainCounters {
-                queued: AtomicUsize::new(0),
-                running: AtomicUsize::new(0),
-                inflight: AtomicUsize::new(0),
-                completed: AtomicU64::new(0),
-                cancelled: AtomicU64::new(0),
-                queue_latency: AtomicU64::new(0),
-                max_queue_latency: AtomicU64::new(0),
-                execution: AtomicU64::new(0),
-                max_execution: AtomicU64::new(0),
-            });
-            let mut workers = Vec::with_capacity(config.workers);
-            for worker in 0..config.workers {
-                let receiver = Arc::clone(&receiver);
-                let completion_tx = completion_tx.clone();
-                let counters = Arc::clone(&counters);
-                let name = format!("hataori-domain-{}-{worker}", config.id.get());
-                workers.push(
-                    std::thread::Builder::new()
-                        .name(name)
-                        .spawn(move || worker_loop(receiver, completion_tx, counters))
-                        .map_err(|_| {
-                            RuntimeError::InvalidLimits("failed to start domain worker")
-                        })?,
-                );
-            }
+            let domain = config.id;
+            let pool = Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(config.workers)
+                    .thread_name(move |worker| format!("hataori-domain-{}-{worker}", domain.get()))
+                    .build()
+                    .map_err(|_| RuntimeError::InvalidLimits("failed to start domain workers"))?,
+            );
             domains.insert(
                 config.id,
                 DomainExecutor {
-                    sender,
-                    counters,
-                    workers,
+                    pool,
+                    completions: completion_tx.clone(),
+                    counters: Arc::new(DomainCounters {
+                        queued: AtomicUsize::new(0),
+                        running: AtomicUsize::new(0),
+                        inflight: AtomicUsize::new(0),
+                        completed: AtomicU64::new(0),
+                        cancelled: AtomicU64::new(0),
+                        queue_latency: AtomicU64::new(0),
+                        max_queue_latency: AtomicU64::new(0),
+                        execution: AtomicU64::new(0),
+                        max_execution: AtomicU64::new(0),
+                    }),
                     queue_capacity: config.queue_capacity,
                 },
             );
@@ -177,29 +172,41 @@ impl DomainRegistry {
         })
     }
 
+    pub(crate) fn pools(&self) -> BTreeMap<DomainId, Arc<ThreadPool>> {
+        self.domains
+            .iter()
+            .map(|(id, domain)| (*id, Arc::clone(&domain.pool)))
+            .collect()
+    }
+
+    pub(crate) fn can_submit(&self, domain: DomainId) -> bool {
+        self.domains.get(&domain).is_some_and(|entry| {
+            entry.counters.queued.load(Ordering::Acquire) < entry.queue_capacity
+        })
+    }
+
     pub(crate) fn submit(&self, job: ActionJob) -> Result<(), RuntimeError> {
         let domain = self
             .domains
             .get(&job.domain)
             .ok_or(RuntimeError::UnknownDomain(job.domain))?;
-        domain.counters.queued.fetch_add(1, Ordering::AcqRel);
+        domain
+            .counters
+            .queued
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                (queued < domain.queue_capacity).then_some(queued + 1)
+            })
+            .map_err(|_| RuntimeError::ResourceExhausted {
+                resource: ResourceKind::ActionQueue,
+                limit: domain.queue_capacity,
+            })?;
         domain.counters.inflight.fetch_add(1, Ordering::AcqRel);
-        match domain.sender.try_send(WorkerMessage::Run(job)) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => {
-                domain.counters.queued.fetch_sub(1, Ordering::AcqRel);
-                domain.counters.inflight.fetch_sub(1, Ordering::AcqRel);
-                Err(RuntimeError::ResourceExhausted {
-                    resource: ResourceKind::ActionQueue,
-                    limit: domain.queue_capacity,
-                })
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                domain.counters.queued.fetch_sub(1, Ordering::AcqRel);
-                domain.counters.inflight.fetch_sub(1, Ordering::AcqRel);
-                Err(RuntimeError::Shutdown)
-            }
-        }
+        let completions = domain.completions.clone();
+        let counters = Arc::clone(&domain.counters);
+        domain
+            .pool
+            .spawn(move || execute_job(job, completions, counters));
+        Ok(())
     }
 
     pub(crate) fn try_completion(&self) -> Option<ActionCompletion> {
@@ -224,70 +231,50 @@ impl DomainRegistry {
     }
 
     pub(crate) fn stop(&mut self) {
-        for domain in self.domains.values_mut() {
-            for _ in 0..domain.workers.len() {
-                let _ = domain.sender.send(WorkerMessage::Stop);
-            }
-            for worker in domain.workers.drain(..) {
-                let _ = worker.join();
-            }
-        }
+        debug_assert!(self.idle(), "domain stop requires drained work");
     }
 }
 
-fn worker_loop(
-    receiver: Arc<Mutex<Receiver<WorkerMessage>>>,
+fn execute_job(
+    job: ActionJob,
     completions: SyncSender<ActionCompletion>,
     counters: Arc<DomainCounters>,
 ) {
-    loop {
-        let message = receiver.lock().unwrap().recv();
-        let Ok(message) = message else {
-            return;
-        };
-        let WorkerMessage::Run(job) = message else {
-            return;
-        };
-        counters.queued.fetch_sub(1, Ordering::AcqRel);
-        counters.running.fetch_add(1, Ordering::AcqRel);
-        let started_at = std::time::Instant::now();
-        let queue_latency = nanos(started_at.saturating_duration_since(job.submitted_at));
-        counters
-            .queue_latency
-            .fetch_add(queue_latency, Ordering::Relaxed);
-        counters
-            .max_queue_latency
-            .fetch_max(queue_latency, Ordering::Relaxed);
-        let cancelled = job.cancelled.load(Ordering::Acquire);
-        let result = if cancelled {
-            counters.cancelled.fetch_add(1, Ordering::Relaxed);
-            Err(ActionError::user("action cancelled before execution"))
-        } else {
-            job.handler.execute(job.input)
-        };
-        let execution = nanos(started_at.elapsed());
-        counters.execution.fetch_add(execution, Ordering::Relaxed);
-        counters
-            .max_execution
-            .fetch_max(execution, Ordering::Relaxed);
-        counters.running.fetch_sub(1, Ordering::AcqRel);
-        counters.completed.fetch_add(1, Ordering::Relaxed);
-        if completions
-            .send(ActionCompletion {
-                requester: job.requester,
-                request: job.request,
-                action_id: job.action_id,
-                domain: job.domain,
-                trace_id: job.trace_id,
-                result,
-                cancelled,
-                local: job.local,
-            })
-            .is_err()
-        {
-            return;
-        }
-    }
+    counters.queued.fetch_sub(1, Ordering::AcqRel);
+    counters.running.fetch_add(1, Ordering::AcqRel);
+    let started_at = std::time::Instant::now();
+    let queue_latency = nanos(started_at.saturating_duration_since(job.submitted_at));
+    counters
+        .queue_latency
+        .fetch_add(queue_latency, Ordering::Relaxed);
+    counters
+        .max_queue_latency
+        .fetch_max(queue_latency, Ordering::Relaxed);
+    let cancelled = job.cancelled.load(Ordering::Acquire);
+    let result = if cancelled {
+        counters.cancelled.fetch_add(1, Ordering::Relaxed);
+        Err(ActionError::user("action cancelled before execution"))
+    } else {
+        job.handler.execute(job.input)
+    };
+    let execution = nanos(started_at.elapsed());
+    counters.execution.fetch_add(execution, Ordering::Relaxed);
+    counters
+        .max_execution
+        .fetch_max(execution, Ordering::Relaxed);
+    counters.running.fetch_sub(1, Ordering::AcqRel);
+    counters.completed.fetch_add(1, Ordering::Relaxed);
+    let _ = completions.send(ActionCompletion {
+        requester: job.requester,
+        request: job.request,
+        action_id: job.action_id,
+        domain: job.domain,
+        trace_id: job.trace_id,
+        result,
+        cancelled,
+        local: job.local,
+        object: job.object,
+    });
 }
 
 fn nanos(duration: std::time::Duration) -> u64 {

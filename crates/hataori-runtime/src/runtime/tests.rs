@@ -1,5 +1,5 @@
 use super::*;
-use crate::{ActionError, WireValue};
+use crate::{ActionError, DistributedObject, ObjectReadAction, ObjectWriteAction, WireValue};
 use hataori_runtime_foundation::{
     memory::{MemoryFault, MemoryNetwork},
     protocol::ProtocolLimits,
@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Add {
     left: u64,
     right: u64,
@@ -80,6 +80,173 @@ impl Action for Fail {
     type Output = ();
 }
 
+struct Counter(u64);
+impl WireValue for Counter {
+    const SCHEMA_ID: u64 = 200;
+    fn encode(self) -> Result<Segments, ActionError> {
+        self.0.encode()
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        Ok(Self(u64::decode(segments)?))
+    }
+}
+impl DistributedObject for Counter {
+    const TYPE_ID: u128 = 200;
+}
+
+struct Increment(u64);
+impl WireValue for Increment {
+    const SCHEMA_ID: u64 = 201;
+    fn encode(self) -> Result<Segments, ActionError> {
+        self.0.encode()
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        Ok(Self(u64::decode(segments)?))
+    }
+}
+impl ObjectWriteAction<Counter> for Increment {
+    const ID: u128 = 201;
+    type Output = u64;
+    fn execute(self, state: &mut Counter) -> Result<u64, ActionError> {
+        state.0 += self.0;
+        Ok(state.0)
+    }
+}
+
+struct ReadCounter;
+impl WireValue for ReadCounter {
+    const SCHEMA_ID: u64 = 202;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Ok(Vec::new())
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        if segments.is_empty() {
+            Ok(Self)
+        } else {
+            Err(ActionError::codec("read payload"))
+        }
+    }
+}
+impl ObjectReadAction<Counter> for ReadCounter {
+    const ID: u128 = 202;
+    type Output = u64;
+    fn execute(self, state: &Counter) -> Result<u64, ActionError> {
+        Ok(state.0)
+    }
+}
+
+struct PanicCounter;
+impl WireValue for PanicCounter {
+    const SCHEMA_ID: u64 = 203;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Ok(Vec::new())
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        if segments.is_empty() {
+            Ok(Self)
+        } else {
+            Err(ActionError::codec("panic payload"))
+        }
+    }
+}
+impl ObjectWriteAction<Counter> for PanicCounter {
+    const ID: u128 = 203;
+    type Output = ();
+    fn execute(self, _: &mut Counter) -> Result<(), ActionError> {
+        panic!("expected object panic")
+    }
+}
+
+struct LocalOnly(u64);
+impl WireValue for LocalOnly {
+    const SCHEMA_ID: u64 = 210;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Err(ActionError::codec("must not encode local object"))
+    }
+    fn decode(_: Segments) -> Result<Self, ActionError> {
+        Err(ActionError::codec("must not decode local object"))
+    }
+}
+impl DistributedObject for LocalOnly {
+    const TYPE_ID: u128 = 210;
+}
+
+struct LocalOnlyAdd(u64);
+impl WireValue for LocalOnlyAdd {
+    const SCHEMA_ID: u64 = 211;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Err(ActionError::codec("must not encode local action"))
+    }
+    fn decode(_: Segments) -> Result<Self, ActionError> {
+        Err(ActionError::codec("must not decode local action"))
+    }
+}
+impl ObjectWriteAction<LocalOnly> for LocalOnlyAdd {
+    const ID: u128 = 211;
+    type Output = u64;
+    fn execute(self, state: &mut LocalOnly) -> Result<u64, ActionError> {
+        state.0 += self.0;
+        Ok(state.0)
+    }
+}
+
+struct CheckDomain;
+impl WireValue for CheckDomain {
+    const SCHEMA_ID: u64 = 212;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Err(ActionError::codec("must not encode local action"))
+    }
+    fn decode(_: Segments) -> Result<Self, ActionError> {
+        Err(ActionError::codec("must not decode local action"))
+    }
+}
+impl ObjectWriteAction<LocalOnly> for CheckDomain {
+    const ID: u128 = 212;
+    type Output = u64;
+    fn execute(self, _: &mut LocalOnly) -> Result<u64, ActionError> {
+        Ok(u64::from(rayon::current_thread_index().is_some()))
+    }
+}
+
+struct Blob(Vec<u8>);
+impl WireValue for Blob {
+    const SCHEMA_ID: u64 = 220;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Ok(vec![self.0])
+    }
+    fn decode(mut segments: Segments) -> Result<Self, ActionError> {
+        if segments.len() != 1 {
+            return Err(ActionError::codec("blob payload"));
+        }
+        Ok(Self(segments.pop().unwrap()))
+    }
+}
+impl DistributedObject for Blob {
+    const TYPE_ID: u128 = 220;
+}
+
+struct BlobLen;
+impl WireValue for BlobLen {
+    const SCHEMA_ID: u64 = 221;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Ok(Vec::new())
+    }
+    fn decode(segments: Segments) -> Result<Self, ActionError> {
+        if segments.is_empty() {
+            Ok(Self)
+        } else {
+            Err(ActionError::codec("blob len payload"))
+        }
+    }
+}
+impl ObjectReadAction<Blob> for BlobLen {
+    const ID: u128 = 221;
+    type Output = u64;
+    fn execute(self, state: &Blob) -> Result<u64, ActionError> {
+        Ok(state.0.len() as u64)
+    }
+}
+
 fn builder(run_id: RunId, count: Arc<AtomicUsize>) -> RuntimeBuilder {
     builder_with_limits(
         run_id,
@@ -100,6 +267,12 @@ fn builder_with_limits(
 ) -> RuntimeBuilder {
     let mut builder = Runtime::builder(run_id, ProtocolLimits::default(), limits).unwrap();
     builder
+        .object_limits(ObjectLimits {
+            max_placement_tickets: 1,
+            ..ObjectLimits::default()
+        })
+        .unwrap();
+    builder
         .register::<Add, _>(move |add| {
             count.fetch_add(1, Ordering::Relaxed);
             Ok(add.left + add.right)
@@ -108,6 +281,25 @@ fn builder_with_limits(
     builder
         .register::<Fail, _>(|_| Err(ActionError::user("expected failure")))
         .unwrap();
+    builder.register_object_read_write::<Counter>().unwrap();
+    builder
+        .register_object_read::<Counter, ReadCounter>()
+        .unwrap();
+    builder
+        .register_object_write::<Counter, Increment>()
+        .unwrap();
+    builder
+        .register_object_write::<Counter, PanicCounter>()
+        .unwrap();
+    builder.register_object_exclusive::<LocalOnly>().unwrap();
+    builder
+        .register_object_write::<LocalOnly, LocalOnlyAdd>()
+        .unwrap();
+    builder
+        .register_object_write::<LocalOnly, CheckDomain>()
+        .unwrap();
+    builder.register_object_read_write::<Blob>().unwrap();
+    builder.register_object_read::<Blob, BlobLen>().unwrap();
     builder
 }
 
@@ -160,6 +352,14 @@ fn drive<T: WireValue>(
     right: &mut Runtime,
     future: RemoteFuture<T>,
 ) -> Result<T, RuntimeError> {
+    drive_future(left, right, future)
+}
+
+fn drive_future<T>(
+    left: &mut Runtime,
+    right: &mut Runtime,
+    future: impl Future<Output = Result<T, RuntimeError>>,
+) -> Result<T, RuntimeError> {
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
@@ -175,9 +375,24 @@ fn drive<T: WireValue>(
 }
 
 fn shutdown_pair(left: &mut Runtime, right: &mut Runtime) {
-    for _ in 0..32 {
+    for _ in 0..10_000 {
         let _ = left.progress(64);
         let _ = right.progress(64);
+        let settled = [&left.stats(), &right.stats()].into_iter().all(|stats| {
+            stats.pending_calls == 0
+                && stats.send_tickets == 0
+                && stats.queued_responses == 0
+                && stats.objects.queued_calls == 0
+                && stats.objects.in_flight_calls == 0
+                && stats.transport.pending_events == 0
+                && stats.domains.iter().all(|(_, domain)| {
+                    domain.queued == 0 && domain.running == 0 && domain.pending_completions == 0
+                })
+        });
+        if settled {
+            break;
+        }
+        std::thread::yield_now();
     }
     left.shutdown().unwrap();
     right.shutdown().unwrap();
@@ -460,6 +675,240 @@ fn shutdown_atomically_rejects_concurrent_client_submission() {
     assert_eq!(report.stats.pending_calls, 0);
     assert_eq!(report.stats.queued_responses, 0);
     right.shutdown().unwrap();
+}
+
+#[test]
+fn fixed_remote_object_creation_calls_clone_lease_and_collection() {
+    let (mut left, mut right, left_count, right_count) = pair([]);
+    let client = left.client();
+    let create = client
+        .create_at(
+            Place::new(LocalityId::new(1), DomainId::DEFAULT),
+            Counter(4),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    assert_eq!(remote.observed_location().locality(), LocalityId::new(1));
+    let clone = remote.clone();
+    let mut stale = remote.clone();
+    stale.location = hataori_runtime_foundation::protocol::ObjectLocation::new(
+        stale.location.locality(),
+        stale.location.domain(),
+        stale.location.slot(),
+        stale.location.generation(),
+        stale.location.epoch() + 1,
+    )
+    .unwrap();
+    left.shared.objects.clear_resolver();
+    assert!(matches!(
+        drive_future(&mut left, &mut right, stale.call_read(ReadCounter).unwrap()),
+        Err(RuntimeError::RemoteObject { .. })
+    ));
+    assert_eq!(left.state(), RuntimeState::Running);
+    left.shared
+        .objects
+        .cache_location(remote.object, remote.location);
+    let weak = remote.downgrade();
+    let decoded_weak = WeakRemote::<Counter>::decode(weak.encode().unwrap()).unwrap();
+    assert_eq!(decoded_weak.object_id(), remote.object_id());
+    let upgraded = drive_future(&mut left, &mut right, weak.upgrade(&client).unwrap()).unwrap();
+    assert_eq!(
+        drive_future(
+            &mut left,
+            &mut right,
+            remote.call_write(Increment(3)).unwrap()
+        )
+        .unwrap(),
+        7
+    );
+    assert_eq!(
+        drive_future(&mut left, &mut right, clone.call_read(ReadCounter).unwrap()).unwrap(),
+        7
+    );
+    assert_eq!(right.stats().objects.live_objects, 1);
+    assert_eq!(right.stats().objects.leases, 1);
+    let colocated = client
+        .spawn_colocated(&remote, Add { left: 2, right: 5 })
+        .unwrap();
+    assert_eq!(left.stats().objects.placement_tickets, 1);
+    let preferred = client
+        .spawn_preferred_colocated(&remote, PlacementFallback::Any, Add { left: 4, right: 5 })
+        .unwrap();
+    assert_eq!(drive_future(&mut left, &mut right, preferred).unwrap(), 9);
+    assert_eq!(left_count.load(Ordering::Relaxed), 1);
+    assert_eq!(drive_future(&mut left, &mut right, colocated).unwrap(), 7);
+    assert_eq!(right_count.load(Ordering::Relaxed), 1);
+    assert_eq!(left.stats().objects.placement_tickets, 0);
+    drop(remote);
+    drop(stale);
+    drop(upgraded);
+    assert_eq!(right.stats().objects.leases, 1);
+    drop(clone);
+    for _ in 0..32 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(right.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn remote_object_panic_releases_admission_and_pin() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(1), DomainId::DEFAULT),
+            Counter(1),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    assert!(matches!(
+        drive_future(
+            &mut left,
+            &mut right,
+            remote.call_write(PanicCounter).unwrap()
+        ),
+        Err(RuntimeError::RemoteAction { .. })
+    ));
+    assert_eq!(right.stats().objects.in_flight_calls, 0);
+    assert_eq!(right.stats().objects.queued_calls, 0);
+    drop(remote);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn segmented_megabyte_object_state_is_created_once_and_called_remotely() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(1), DomainId::DEFAULT),
+            Blob(vec![0x5a; 1024 * 1024 + 17]),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    assert_eq!(
+        drive_future(&mut left, &mut right, remote.call_read(BlobLen).unwrap()).unwrap(),
+        1024 * 1024 + 17
+    );
+    drop(remote);
+    for _ in 0..32 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(right.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn same_locality_object_creation_and_call_skip_codecs_and_transport() {
+    let (mut left, mut right, _, _) = pair([]);
+    let sent_before = left.stats().sent_by_channel;
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            LocalOnly(5),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    assert_eq!(
+        drive_future(
+            &mut left,
+            &mut right,
+            remote.call_write(LocalOnlyAdd(4)).unwrap(),
+        )
+        .unwrap(),
+        9
+    );
+    assert_eq!(
+        drive_future(
+            &mut left,
+            &mut right,
+            remote.call_write(CheckDomain).unwrap(),
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(left.stats().sent_by_channel, sent_before);
+    assert_eq!(left.stats().objects.local_calls, 2);
+    drop(remote);
+    assert_eq!(left.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn lease_transfer_imports_once_and_enables_same_locality_fast_call() {
+    let (mut left, mut right, _, _) = pair([]);
+    let create = left
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(1), DomainId::DEFAULT),
+            Counter(12),
+        )
+        .unwrap();
+    let remote = drive_future(&mut left, &mut right, create).unwrap();
+    let transfer = drive_future(
+        &mut left,
+        &mut right,
+        remote.transfer_to(LocalityId::new(1)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(right.stats().objects.leases, 2);
+    let imported = right.client().import_transfer(transfer).unwrap();
+    for _ in 0..16 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(right.stats().objects.transfers, 0);
+    drop(remote);
+    for _ in 0..16 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    let sent_before = right.stats().sent_by_channel;
+    assert_eq!(
+        drive_future(
+            &mut right,
+            &mut left,
+            imported.call_read(ReadCounter).unwrap()
+        )
+        .unwrap(),
+        12
+    );
+    assert_eq!(right.stats().sent_by_channel, sent_before);
+    assert_eq!(right.stats().objects.local_calls, 1);
+    drop(imported);
+    assert_eq!(right.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
+}
+
+#[test]
+fn object_root_retains_after_last_lease_and_releases_mechanically() {
+    let (mut left, mut right, _, _) = pair([]);
+    let rooted = left
+        .client()
+        .create_rooted_at(
+            Place::new(LocalityId::new(1), DomainId::DEFAULT),
+            Counter(9),
+        )
+        .unwrap();
+    let (remote, root) = drive_future(&mut left, &mut right, rooted).unwrap();
+    drop(remote);
+    for _ in 0..16 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(right.stats().objects.live_objects, 1);
+    assert_eq!(right.stats().objects.roots, 1);
+    drop(root);
+    for _ in 0..16 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+    }
+    assert_eq!(right.stats().objects.live_objects, 0);
+    shutdown_pair(&mut left, &mut right);
 }
 
 #[test]

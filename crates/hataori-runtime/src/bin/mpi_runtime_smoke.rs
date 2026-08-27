@@ -1,6 +1,6 @@
 mod support;
 
-use hataori_runtime::{Place, RemoteFuture, Runtime, RuntimeError, RuntimeLimits};
+use hataori_runtime::{Place, Runtime, RuntimeError, RuntimeLimits};
 use hataori_runtime_foundation::{
     mpi::MpiTransport,
     protocol::{DomainId, LocalityId, ProtocolLimits, RunId},
@@ -16,7 +16,7 @@ use std::{
     task::{Context, Poll, Wake, Waker},
     time::Duration,
 };
-use support::Increment;
+use support::{Counter, CounterAdd, Increment};
 
 struct ThreadWake(std::thread::Thread);
 
@@ -26,11 +26,11 @@ impl Wake for ThreadWake {
     }
 }
 
-fn collective_block_on<C: CommunicatorCollectives>(
+fn collective_block_on<C: CommunicatorCollectives, T>(
     world: &C,
     runtime: &mut Runtime,
-    future: RemoteFuture<u64>,
-) -> Result<u64, RuntimeError> {
+    future: impl Future<Output = Result<T, RuntimeError>>,
+) -> Result<T, RuntimeError> {
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
@@ -78,6 +78,20 @@ fn run_round<C: Communicator + CommunicatorCollectives>(world: &C, run: u128) {
         collective_block_on(world, &mut runtime, future).unwrap(),
         world.rank() as u64 + 1
     );
+    let create = runtime
+        .client()
+        .create_at(
+            Place::new(LocalityId::new(destination as u64), DomainId::DEFAULT),
+            Counter(run as u64),
+        )
+        .unwrap();
+    let remote = collective_block_on(world, &mut runtime, create).unwrap();
+    let call = remote.call_write(CounterAdd(5)).unwrap();
+    assert_eq!(
+        collective_block_on(world, &mut runtime, call).unwrap(),
+        run as u64 + 5
+    );
+    drop(remote);
     let report = runtime.shutdown().unwrap();
     assert_eq!(report.stats.pending_calls, 0);
     assert_eq!(report.stats.transport.retained_bytes(), 0);

@@ -12,6 +12,7 @@ mpi = ["hataori-runtime-foundation/mpi", "dep:mpi"]
 [dependencies]
 hataori-runtime-foundation = { path = "../hataori-runtime-foundation" }
 mpi = { version = "=0.8.1", default-features = false, optional = true }
+rayon = "1.10"
 
 [[bin]]
 name = "tcp_runtime_smoke"

@@ -1,6 +1,6 @@
 mod support;
 
-use hataori_runtime::{Place, RemoteFuture, Runtime, RuntimeError, RuntimeLimits};
+use hataori_runtime::{Place, Runtime, RuntimeError, RuntimeLimits};
 use hataori_runtime_foundation::{
     protocol::{DomainId, LocalityId, ProtocolLimits, RunId},
     tcp::{TcpConfig, TcpRendezvous, TcpRendezvousConfig, TcpTransport},
@@ -16,7 +16,7 @@ use std::{
     task::{Context, Poll, Wake, Waker},
     time::Duration,
 };
-use support::Increment;
+use support::{Counter, CounterAdd, Increment};
 
 struct ThreadWake(std::thread::Thread);
 
@@ -26,11 +26,11 @@ impl Wake for ThreadWake {
     }
 }
 
-fn cooperative_block_on(
+fn cooperative_block_on<T>(
     runtime: &mut Runtime,
-    future: RemoteFuture<u64>,
+    future: impl Future<Output = Result<T, RuntimeError>>,
     finished: &AtomicUsize,
-) -> Result<u64, RuntimeError> {
+) -> Result<T, RuntimeError> {
     let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
     let mut context = Context::from_waker(&waker);
     let mut future = Box::pin(future);
@@ -63,6 +63,8 @@ fn run_round(run: u128) {
     let endpoints = [reserve_endpoint(), reserve_endpoint()];
     let barrier = Arc::new(Barrier::new(2));
     let finished = Arc::new(AtomicUsize::new(0));
+    let created = Arc::new(AtomicUsize::new(0));
+    let called = Arc::new(AtomicUsize::new(0));
     std::thread::scope(|scope| {
         let joins: Vec<_> = endpoints
             .into_iter()
@@ -70,6 +72,8 @@ fn run_round(run: u128) {
             .map(|(index, local_endpoint)| {
                 let barrier = Arc::clone(&barrier);
                 let finished = Arc::clone(&finished);
+                let created = Arc::clone(&created);
+                let called = Arc::clone(&called);
                 scope.spawn(move || {
                     let mut builder = Runtime::builder(
                         run_id,
@@ -109,6 +113,30 @@ fn run_round(run: u128) {
                         cooperative_block_on(&mut runtime, future, &finished).unwrap(),
                         run as u64 + 1
                     );
+                    let create = runtime
+                        .client()
+                        .create_at(Place::new(peer, DomainId::DEFAULT), Counter(run as u64))
+                        .unwrap();
+                    let remote = cooperative_block_on(&mut runtime, create, &created).unwrap();
+                    let call = remote.call_write(CounterAdd(5)).unwrap();
+                    assert_eq!(
+                        cooperative_block_on(&mut runtime, call, &called).unwrap(),
+                        run as u64 + 5
+                    );
+                    drop(remote);
+                    for _ in 0..10_000 {
+                        runtime.progress(64).unwrap();
+                        if runtime.stats().objects.live_objects == 0 {
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                    assert_eq!(runtime.stats().objects.live_objects, 0);
+                    barrier.wait();
+                    for _ in 0..128 {
+                        runtime.progress(64).unwrap();
+                        std::thread::yield_now();
+                    }
                     barrier.wait();
                     let report = runtime.shutdown().unwrap();
                     assert_eq!(report.stats.pending_calls, 0);

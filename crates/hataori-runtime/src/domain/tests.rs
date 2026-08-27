@@ -1,6 +1,9 @@
 use super::*;
 use crate::{action::ActionRegistry, Action, WireValue};
-use std::{sync::Condvar, time::Instant};
+use std::{
+    sync::{Condvar, Mutex},
+    time::Instant,
+};
 
 struct Block;
 impl WireValue for Block {
@@ -33,6 +36,7 @@ fn job(handler: RegisteredAction, sequence: u64) -> ActionJob {
         cancelled: Arc::new(AtomicBool::new(false)),
         local: true,
         submitted_at: Instant::now(),
+        object: None,
     }
 }
 

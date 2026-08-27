@@ -16,6 +16,7 @@ project:
     - core-acceptance-ledger.md
     - phase-a-acceptance-ledger.md
     - phase-b-acceptance-ledger.md
+    - phase-c-acceptance-ledger.md
     - tenferro-acceptance-ledger.md
     - "!superpowers/**"
     - "!worklogs/**"
@@ -82,6 +83,8 @@ website:
             href: design.md
           - text: "P1 bounded prefetch"
             href: design/bounded-prefetch.md
+          - text: "Phase C fixed-placement objects"
+            href: design/phase-c-objects.md
           - text: "tenferro adapter"
             href: design/tenferro-adapter.md
           - implementation-readiness.md
@@ -89,4 +92,5 @@ website:
           - core-acceptance-ledger.md
           - phase-a-acceptance-ledger.md
           - phase-b-acceptance-ledger.md
+          - phase-c-acceptance-ledger.md
           - tenferro-acceptance-ledger.md

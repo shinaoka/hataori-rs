@@ -29,6 +29,20 @@ fn parcel() -> Parcel {
 }
 
 #[test]
+fn object_identity_is_location_independent_and_checked() {
+    let run = RunId::new(7).unwrap();
+    let id = ObjectId::new(run, 9).unwrap();
+    let ty = ObjectTypeId::new(11).unwrap();
+    let location = ObjectLocation::new(LocalityId::new(2), DomainId::new(3), 4, 1, 1).unwrap();
+    assert_eq!(id.run(), run);
+    assert_eq!(id.unique(), 9);
+    assert_eq!(ty.get(), 11);
+    assert_eq!(location.locality(), LocalityId::new(2));
+    assert!(ObjectId::new(run, 0).is_err());
+    assert!(ObjectLocation::new(LocalityId::new(0), DomainId::DEFAULT, 0, 1, 1).is_err());
+}
+
+#[test]
 fn hello_round_trip_and_negotiation() {
     let local = hello();
     let decoded = decode_hello(&encode_hello(&local).unwrap()).unwrap();
