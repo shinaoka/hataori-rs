@@ -22,6 +22,18 @@ design document with a one-line description, so each is one fetch away.
 
 **Hataori** comes from the Japanese word **機織り** (*hataori*), meaning weaving on a loom. The name reflects the engine's job: weave independent strands of work across MPI ranks and Rayon threads into one ordered result.
 
+## Development status
+
+The public `hataori` crate implements the synchronous P0/P1 `map`, `map_in`,
+collective `pmap`, and placement helpers. The unpublished
+`hataori-runtime-foundation` workspace crate implements Issue #14 Phase A only:
+transport-independent protocol/framing, deterministic memory faults, bounded
+TCP rendezvous/transport, and MPI transport with segmented payloads.
+
+Run its acceptance lane with `scripts/check-runtime-foundation.sh`. The
+requirement-to-evidence map is recorded in
+[`docs/phase-a-acceptance-ledger.md`](docs/phase-a-acceptance-ledger.md).
+
 ## Features
 
 Hataori has no default dependencies. Optional execution backends are selected explicitly:

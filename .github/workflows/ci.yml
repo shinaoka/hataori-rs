@@ -42,6 +42,8 @@ jobs:
             966f4231c96153a08295fc7d0bcbd65e916a73fd
       - name: Check immutable legacy performance runner
         run: scripts/check-legacy-runner.sh
+      - name: Check Phase A runtime foundation
+        run: scripts/check-runtime-foundation.sh
 
   tenferro-adapter:
     runs-on: ubuntu-latest

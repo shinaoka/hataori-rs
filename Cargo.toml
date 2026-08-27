@@ -1,5 +1,5 @@
 [workspace]
-members = ["adapters/tenferro"]
+members = ["adapters/tenferro", "crates/hataori-runtime-foundation"]
 default-members = ["."]
 resolver = "2"
 

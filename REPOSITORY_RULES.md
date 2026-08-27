@@ -7,8 +7,10 @@ rules loaded through `AGENTS.md`.
 
 - `docs/design.md` describes the implemented synchronous P0 architecture.
 - `docs/design/bounded-prefetch.md` describes the implemented P1 extension.
-- `docs/design/distributed-runtime.md` describes the accepted direction for a
-  future long-lived distributed runtime.
+- `docs/design/distributed-runtime.md` describes the accepted long-term runtime
+  and records which phases are implemented.
+- `docs/design/phase-a-transport-foundation.md` describes the implemented
+  unpublished Phase A protocol and transport boundary; it is not a runtime API.
 - Do not present a future-runtime capability as implemented until source,
   runnable examples, and tests provide it.
 - Backward compatibility with the current P0 API is not a design requirement

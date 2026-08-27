@@ -262,6 +262,31 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Non-blocking notes, with no extra review round requested: align the design's sample record/input wording, strengthen later orchestrator field validation, avoid misleading mpi-only thread metadata, and make hosted MPI absence fail closed when the manifest/orchestrator slice adds an explicit CI mode.
 - Gate status: **COMPLETE — Phase A-1 is ready to merge**
 
+### Phase A-2/3 — protocol and transport foundation
+
+- Design slice: `docs/design/phase-a-transport-foundation.md` and Phase A
+  requirements in `docs/design/distributed-runtime.md` §§15.3/20/21.
+- Reviewer selected by user: `reviewer-flash` (DeepSeek family, read-only,
+  `high`; `reviewer-flash-opencode-go` was unavailable).
+- Post-implementation review: two 60-second evidence attempts expired without
+  a verdict; no gate credit was assigned. The same required review then read
+  the exact remaining implementation ranges under a bounded continuation.
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none.
+- Verified: shared atomic close/reservation/RAII rollback, exact queue/byte
+  accounting, TCP partial-frame and partial-write bounds, terminal cleanup,
+  MPI chunk/reassembly bounds, and backend release paths.
+- Non-blocking finding fixed before submission: an unreachable-after-validation
+  MPI encode failure now preserves the ticket/reservation, releases accounting,
+  and emits `SendFailed`, matching TCP. A focused regression test preserves
+  the release metadata. Per the selected minimal-review policy, a non-blocking
+  fix does not trigger another review round.
+- Verification: `scripts/check-runtime-foundation.sh` passed 30 MPI-feature
+  unit tests, default/MPI clippy, rustdoc, Rust 1.85, backend scanners, TCP
+  smoke, and MPI n=1/2/4; the bounded core matrix, immutable runner,
+  performance manifest, and rendered docs also passed.
+- Gate status: **COMPLETE — Phase A-2/3 is ready to merge**
+
 ### P1 — bounded prefetch
 
 - Design slice: `docs/design/bounded-prefetch.md` plus the P1 amendments in `docs/design.md` and `docs/implementation-readiness.md`

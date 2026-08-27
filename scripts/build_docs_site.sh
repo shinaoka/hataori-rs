@@ -14,6 +14,7 @@ root_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 out_dir=${1:-$root_dir/target/docs-site}
 doc_root=$root_dir/target/doc
 cd "$root_dir"
+export BINDGEN_EXTRA_CLANG_ARGS=${BINDGEN_EXTRA_CLANG_ARGS:-"-I$(gcc -print-file-name=include)"}
 
 echo "[1/6] Checking doc snippets"
 python3 scripts/check-doc-snippets.py --root-dir "$root_dir" --check

@@ -14,6 +14,7 @@ project:
     - implementation-readiness.md
     - review-log.md
     - core-acceptance-ledger.md
+    - phase-a-acceptance-ledger.md
     - tenferro-acceptance-ledger.md
     - "!superpowers/**"
     - "!worklogs/**"
@@ -85,4 +86,5 @@ website:
           - implementation-readiness.md
           - review-log.md
           - core-acceptance-ledger.md
+          - phase-a-acceptance-ledger.md
           - tenferro-acceptance-ledger.md

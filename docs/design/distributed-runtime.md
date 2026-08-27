@@ -1,6 +1,6 @@
 # Hataori distributed runtime architecture
 
-**Status:** Accepted long-term direction; implementation has not started
+**Status:** Accepted long-term direction; Phase A protocol/transport foundation implemented, long-lived runtime phases B-E not implemented
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
@@ -29,6 +29,11 @@ engine over MPI and rank-local Rayon domains. Its root coordinator dynamically
 distributes fixed input batches and returns ordered results. That design remains
 documented in [`../design.md`](../design.md) and
 [`bounded-prefetch.md`](bounded-prefetch.md).
+
+The unpublished `hataori-runtime-foundation` workspace crate implements the
+Phase A protocol, deterministic memory backend, TCP rendezvous/transport, and
+MPI transport described below. It does not yet implement runtime lifecycle,
+actions/futures, remote objects, migration, or rebuilt algorithms.
 
 The long-term system is a long-lived Rust distributed runtime. It should support:
 
@@ -926,6 +931,9 @@ validation is not presented as a security subsystem.
 ## 20. Implementation phases
 
 ### Phase A: protocol and transport foundation
+
+The implemented boundary and acceptance evidence are detailed in
+[`phase-a-transport-foundation.md`](phase-a-transport-foundation.md).
 
 - freeze the exact P0/P1 performance baseline runner and predeclare its case
   manifest before changing the measured implementation path;

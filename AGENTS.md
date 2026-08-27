@@ -34,8 +34,9 @@ belong in this repository.
 ## Current status
 
 Hataori's synchronous P0 core and P1 bounded-prefetch extension are implemented.
-The long-term distributed-runtime architecture is a forward-looking design and
-does not describe the current public API. Read both:
+The unpublished `hataori-runtime-foundation` crate implements Issue #14 Phase A
+protocol and transport infrastructure, but no long-lived runtime public API.
+The remaining distributed-runtime architecture is forward-looking. Read both:
 
 - `docs/design.md` for the implemented P0 architecture;
 - `docs/design/distributed-runtime.md` for the proposed long-term architecture.
