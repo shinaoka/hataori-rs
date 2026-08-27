@@ -1,0 +1,298 @@
+use crate::{
+    action::{RegisteredAction, Segments},
+    error::{ActionError, ResourceKind, RuntimeError},
+};
+use hataori_runtime_foundation::protocol::{ActionId, DomainId, LocalityId, RequestId, TraceId};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+        Arc, Mutex,
+    },
+    thread::JoinHandle,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DomainConfig {
+    pub id: DomainId,
+    pub workers: usize,
+    pub queue_capacity: usize,
+}
+
+impl Default for DomainConfig {
+    fn default() -> Self {
+        Self {
+            id: DomainId::DEFAULT,
+            workers: 1,
+            queue_capacity: 64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DomainStats {
+    pub queued: usize,
+    pub running: usize,
+    pub pending_completions: usize,
+    pub completed: u64,
+    pub cancelled_before_start: u64,
+    pub total_queue_latency_ns: u64,
+    pub max_queue_latency_ns: u64,
+    pub total_execution_ns: u64,
+    pub max_execution_ns: u64,
+}
+
+pub(crate) struct ActionJob {
+    pub requester: LocalityId,
+    pub request: RequestId,
+    pub action_id: ActionId,
+    pub domain: DomainId,
+    pub trace_id: Option<TraceId>,
+    pub input: Segments,
+    pub handler: RegisteredAction,
+    pub cancelled: Arc<AtomicBool>,
+    pub local: bool,
+    pub submitted_at: std::time::Instant,
+}
+
+pub(crate) struct ActionCompletion {
+    pub requester: LocalityId,
+    pub request: RequestId,
+    pub action_id: ActionId,
+    pub domain: DomainId,
+    pub trace_id: Option<TraceId>,
+    pub result: Result<Segments, ActionError>,
+    pub cancelled: bool,
+    pub local: bool,
+}
+
+enum WorkerMessage {
+    Run(ActionJob),
+    Stop,
+}
+
+struct DomainCounters {
+    queued: AtomicUsize,
+    running: AtomicUsize,
+    inflight: AtomicUsize,
+    completed: AtomicU64,
+    cancelled: AtomicU64,
+    queue_latency: AtomicU64,
+    max_queue_latency: AtomicU64,
+    execution: AtomicU64,
+    max_execution: AtomicU64,
+}
+
+impl DomainCounters {
+    fn snapshot(&self) -> DomainStats {
+        let queued = self.queued.load(Ordering::Acquire);
+        let running = self.running.load(Ordering::Acquire);
+        DomainStats {
+            queued,
+            running,
+            pending_completions: self
+                .inflight
+                .load(Ordering::Acquire)
+                .saturating_sub(queued.saturating_add(running)),
+            completed: self.completed.load(Ordering::Relaxed),
+            cancelled_before_start: self.cancelled.load(Ordering::Relaxed),
+            total_queue_latency_ns: self.queue_latency.load(Ordering::Relaxed),
+            max_queue_latency_ns: self.max_queue_latency.load(Ordering::Relaxed),
+            total_execution_ns: self.execution.load(Ordering::Relaxed),
+            max_execution_ns: self.max_execution.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct DomainExecutor {
+    sender: SyncSender<WorkerMessage>,
+    counters: Arc<DomainCounters>,
+    workers: Vec<JoinHandle<()>>,
+    queue_capacity: usize,
+}
+
+pub(crate) struct DomainRegistry {
+    domains: BTreeMap<DomainId, DomainExecutor>,
+    completions: Receiver<ActionCompletion>,
+}
+
+impl DomainRegistry {
+    pub(crate) fn new(
+        configs: &[DomainConfig],
+        completion_capacity: usize,
+    ) -> Result<Self, RuntimeError> {
+        let (completion_tx, completions) = mpsc::sync_channel(completion_capacity);
+        let mut domains = BTreeMap::new();
+        for config in configs {
+            if config.workers == 0 || config.queue_capacity < config.workers {
+                return Err(RuntimeError::InvalidLimits(
+                    "domain workers must be nonzero and fit in its queue capacity",
+                ));
+            }
+            if domains.contains_key(&config.id) {
+                return Err(RuntimeError::InvalidLimits("duplicate domain id"));
+            }
+            let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
+            let receiver = Arc::new(Mutex::new(receiver));
+            let counters = Arc::new(DomainCounters {
+                queued: AtomicUsize::new(0),
+                running: AtomicUsize::new(0),
+                inflight: AtomicUsize::new(0),
+                completed: AtomicU64::new(0),
+                cancelled: AtomicU64::new(0),
+                queue_latency: AtomicU64::new(0),
+                max_queue_latency: AtomicU64::new(0),
+                execution: AtomicU64::new(0),
+                max_execution: AtomicU64::new(0),
+            });
+            let mut workers = Vec::with_capacity(config.workers);
+            for worker in 0..config.workers {
+                let receiver = Arc::clone(&receiver);
+                let completion_tx = completion_tx.clone();
+                let counters = Arc::clone(&counters);
+                let name = format!("hataori-domain-{}-{worker}", config.id.get());
+                workers.push(
+                    std::thread::Builder::new()
+                        .name(name)
+                        .spawn(move || worker_loop(receiver, completion_tx, counters))
+                        .map_err(|_| {
+                            RuntimeError::InvalidLimits("failed to start domain worker")
+                        })?,
+                );
+            }
+            domains.insert(
+                config.id,
+                DomainExecutor {
+                    sender,
+                    counters,
+                    workers,
+                    queue_capacity: config.queue_capacity,
+                },
+            );
+        }
+        Ok(Self {
+            domains,
+            completions,
+        })
+    }
+
+    pub(crate) fn submit(&self, job: ActionJob) -> Result<(), RuntimeError> {
+        let domain = self
+            .domains
+            .get(&job.domain)
+            .ok_or(RuntimeError::UnknownDomain(job.domain))?;
+        domain.counters.queued.fetch_add(1, Ordering::AcqRel);
+        domain.counters.inflight.fetch_add(1, Ordering::AcqRel);
+        match domain.sender.try_send(WorkerMessage::Run(job)) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                domain.counters.queued.fetch_sub(1, Ordering::AcqRel);
+                domain.counters.inflight.fetch_sub(1, Ordering::AcqRel);
+                Err(RuntimeError::ResourceExhausted {
+                    resource: ResourceKind::ActionQueue,
+                    limit: domain.queue_capacity,
+                })
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                domain.counters.queued.fetch_sub(1, Ordering::AcqRel);
+                domain.counters.inflight.fetch_sub(1, Ordering::AcqRel);
+                Err(RuntimeError::Shutdown)
+            }
+        }
+    }
+
+    pub(crate) fn try_completion(&self) -> Option<ActionCompletion> {
+        let completion = self.completions.try_recv().ok()?;
+        if let Some(domain) = self.domains.get(&completion.domain) {
+            domain.counters.inflight.fetch_sub(1, Ordering::AcqRel);
+        }
+        Some(completion)
+    }
+
+    pub(crate) fn stats(&self) -> Vec<(DomainId, DomainStats)> {
+        self.domains
+            .iter()
+            .map(|(id, domain)| (*id, domain.counters.snapshot()))
+            .collect()
+    }
+
+    pub(crate) fn idle(&self) -> bool {
+        self.domains
+            .values()
+            .all(|domain| domain.counters.inflight.load(Ordering::Acquire) == 0)
+    }
+
+    pub(crate) fn stop(&mut self) {
+        for domain in self.domains.values_mut() {
+            for _ in 0..domain.workers.len() {
+                let _ = domain.sender.send(WorkerMessage::Stop);
+            }
+            for worker in domain.workers.drain(..) {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+fn worker_loop(
+    receiver: Arc<Mutex<Receiver<WorkerMessage>>>,
+    completions: SyncSender<ActionCompletion>,
+    counters: Arc<DomainCounters>,
+) {
+    loop {
+        let message = receiver.lock().unwrap().recv();
+        let Ok(message) = message else {
+            return;
+        };
+        let WorkerMessage::Run(job) = message else {
+            return;
+        };
+        counters.queued.fetch_sub(1, Ordering::AcqRel);
+        counters.running.fetch_add(1, Ordering::AcqRel);
+        let started_at = std::time::Instant::now();
+        let queue_latency = nanos(started_at.saturating_duration_since(job.submitted_at));
+        counters
+            .queue_latency
+            .fetch_add(queue_latency, Ordering::Relaxed);
+        counters
+            .max_queue_latency
+            .fetch_max(queue_latency, Ordering::Relaxed);
+        let cancelled = job.cancelled.load(Ordering::Acquire);
+        let result = if cancelled {
+            counters.cancelled.fetch_add(1, Ordering::Relaxed);
+            Err(ActionError::user("action cancelled before execution"))
+        } else {
+            job.handler.execute(job.input)
+        };
+        let execution = nanos(started_at.elapsed());
+        counters.execution.fetch_add(execution, Ordering::Relaxed);
+        counters
+            .max_execution
+            .fetch_max(execution, Ordering::Relaxed);
+        counters.running.fetch_sub(1, Ordering::AcqRel);
+        counters.completed.fetch_add(1, Ordering::Relaxed);
+        if completions
+            .send(ActionCompletion {
+                requester: job.requester,
+                request: job.request,
+                action_id: job.action_id,
+                domain: job.domain,
+                trace_id: job.trace_id,
+                result,
+                cancelled,
+                local: job.local,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+fn nanos(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,6 +1,6 @@
 # Hataori distributed runtime architecture
 
-**Status:** Accepted long-term direction; Phase A protocol/transport foundation implemented, long-lived runtime phases B-E not implemented
+**Status:** Accepted long-term direction; Phase A protocol/transport and Phase B long-lived structured runtime implemented; phases C-E not implemented
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
@@ -32,8 +32,11 @@ documented in [`../design.md`](../design.md) and
 
 The unpublished `hataori-runtime-foundation` workspace crate implements the
 Phase A protocol, deterministic memory backend, TCP rendezvous/transport, and
-MPI transport described below. It does not yet implement runtime lifecycle,
-actions/futures, remote objects, migration, or rebuilt algorithms.
+MPI transport described below. The unpublished `hataori-runtime` crate
+implements the Phase B owner-thread lifecycle, bounded worker domains, typed
+actions/futures, structured scopes, deadlines, cancellation, deduplication,
+observability, and shutdown described in [`phase-b-runtime.md`](phase-b-runtime.md).
+Remote objects, migration, and rebuilt algorithms remain unimplemented.
 
 The long-term system is a long-lived Rust distributed runtime. It should support:
 
@@ -945,10 +948,14 @@ The implemented boundary and acceptance evidence are detailed in
 
 ### Phase B: long-lived runtime and structured execution
 
-- add runtime lifecycle, domain registry, scopes, pending promise table,
-  deadlines, cancellation, and observability;
-- register typed actions and implement `spawn_on`/`RemoteFuture`;
-- establish bounded deduplication and control-plane progress.
+Implemented in the unpublished `hataori-runtime` crate and detailed in
+[`phase-b-runtime.md`](phase-b-runtime.md):
+
+- runtime lifecycle, domain registry, scopes, pending promise table, deadlines,
+  cancellation, and observability;
+- typed action registration and `spawn_on`/`RemoteFuture`;
+- bounded deduplication, retryable response backpressure, and control-plane
+  progress.
 
 ### Phase C: fixed-placement remote objects
 

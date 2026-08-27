@@ -44,6 +44,8 @@ jobs:
         run: scripts/check-legacy-runner.sh
       - name: Check Phase A runtime foundation
         run: scripts/check-runtime-foundation.sh
+      - name: Check Phase B runtime and structured execution
+        run: scripts/check-phase-b-runtime.sh
 
   tenferro-adapter:
     runs-on: ubuntu-latest

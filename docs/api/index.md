@@ -3,6 +3,7 @@
 The rustdoc for the `hataori` crate is published alongside this site:
 
 - [`hataori` crate documentation](hataori/index.html)
+- [`hataori-runtime` Phase B documentation](hataori_runtime/index.html)
 
 It is built with `--features mpi,rayon`, so the MPI, hybrid, and Rayon items
 are all visible; feature-gated items are annotated with the feature that
@@ -17,6 +18,7 @@ enables them. The `rsmpi-rt` backend exposes the same items as `mpi`.
 | MPI and hybrid | `pmap`, `PmapOptions`, `PmapError`, `PmapErrorKind`, `Domain::sequential` |
 | Placement | `broadcast`, `scatter`, `gather`, `PlacementError`, `PlacementErrorKind` |
 | Common | `Domain`, `DomainId`, `LocalMode`, `Place`, `DomainAdmission`, `DomainBusy`, `NegativeRank`, `UnsupportedDomainId` |
+| Phase B runtime (unpublished) | `Runtime`, `RuntimeClient`, `Action`, `WireValue`, `RemoteFuture`, `RuntimeScope`, `RuntimeLimits`, `RuntimeStats` |
 
 Build it locally with:
 

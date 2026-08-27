@@ -3,7 +3,7 @@
 #
 #   1. verify that every published Rust snippet matches examples/
 #   2. validate docs/llms.txt (every entry resolves, README links it)
-#   3. build rustdoc for the core crate with every backend documented
+#   3. build rustdoc for the core and runtime crates
 #   4. render the Quarto site and copy rustdoc under <site>/api/
 #   5. verify that the rendered site publishes llms.txt at its root
 #
@@ -28,6 +28,7 @@ rm -rf "$doc_root"
 # shared MPI/hybrid API surface. Feature-gated items are labelled with
 # `--cfg docsrs` so readers see which feature enables them.
 RUSTDOCFLAGS="--cfg docsrs" cargo doc --no-deps --no-default-features --features mpi,rayon
+RUSTDOCFLAGS="--cfg docsrs" cargo doc -p hataori-runtime --no-deps --no-default-features --features mpi
 
 echo "[4/6] Rendering Quarto site"
 rm -rf "$out_dir"
@@ -41,6 +42,7 @@ echo "[5/6] Copying rustdoc into the site"
 mkdir -p "$out_dir/api"
 cp -a "$doc_root/." "$out_dir/api/"
 [[ -f $out_dir/api/hataori/index.html ]]
+[[ -f $out_dir/api/hataori_runtime/index.html ]]
 touch "$out_dir/.nojekyll"
 
 echo "[6/6] Verifying llms.txt in the rendered site"

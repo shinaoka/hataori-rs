@@ -26,13 +26,22 @@ design document with a one-line description, so each is one fetch away.
 
 The public `hataori` crate implements the synchronous P0/P1 `map`, `map_in`,
 collective `pmap`, and placement helpers. The unpublished
-`hataori-runtime-foundation` workspace crate implements Issue #14 Phase A only:
+`hataori-runtime-foundation` workspace crate implements Issue #14 Phase A:
 transport-independent protocol/framing, deterministic memory faults, bounded
-TCP rendezvous/transport, and MPI transport with segmented payloads.
+TCP rendezvous/transport, and MPI transport with segmented payloads. The
+unpublished `hataori-runtime` crate implements Phase B above that boundary:
+long-lived owner-thread progress, bounded worker domains, typed actions,
+futures, scopes, cancellation, backpressure, statistics, and reusable shutdown.
 
-Run its acceptance lane with `scripts/check-runtime-foundation.sh`. The
-requirement-to-evidence map is recorded in
-[`docs/phase-a-acceptance-ledger.md`](docs/phase-a-acceptance-ledger.md).
+Run the Phase A/B acceptance lanes with:
+
+```bash
+scripts/check-runtime-foundation.sh
+scripts/check-phase-b-runtime.sh
+```
+
+See [`docs/phase-a-acceptance-ledger.md`](docs/phase-a-acceptance-ledger.md) and
+[`docs/phase-b-acceptance-ledger.md`](docs/phase-b-acceptance-ledger.md).
 
 ## Features
 
