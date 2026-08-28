@@ -187,6 +187,21 @@ impl ObjectWriteAction<Counter> for PanicCounter {
     }
 }
 
+struct LocalTyped(u64);
+impl WireValue for LocalTyped {
+    const SCHEMA_ID: u64 = 209;
+    fn encode(self) -> Result<Segments, ActionError> {
+        Err(ActionError::codec("must not encode local typed action"))
+    }
+    fn decode(_: Segments) -> Result<Self, ActionError> {
+        Err(ActionError::codec("must not decode local typed action"))
+    }
+}
+impl Action for LocalTyped {
+    const ID: u128 = 209;
+    type Output = u64;
+}
+
 struct LocalOnly(u64);
 impl WireValue for LocalOnly {
     const SCHEMA_ID: u64 = 210;
@@ -422,6 +437,9 @@ fn builder_with_limits(
         })
         .unwrap();
     builder
+        .register::<LocalTyped, _>(|action| Ok(action.0 + 1))
+        .unwrap();
+    builder
         .register_mobile_object_read_write::<Counter>()
         .unwrap();
     builder
@@ -645,6 +663,33 @@ fn handshake_seals_registry_before_transport_start() {
         builder.register::<Add, _>(|add| Ok(add.left + add.right)),
         Err(RuntimeError::BuilderSealed)
     ));
+}
+
+#[test]
+fn same_locality_typed_action_skips_wire_codec_and_transport() {
+    let (mut left, mut right, _, _) = pair([]);
+    let before = left.stats();
+    let future = left
+        .spawn_on(
+            Place::new(LocalityId::new(0), DomainId::DEFAULT),
+            LocalTyped(4),
+        )
+        .unwrap();
+    assert_eq!(left.block_on(future).unwrap(), 5);
+    let after = left.stats();
+    assert_eq!(
+        after.local_typed_dispatches,
+        before.local_typed_dispatches + 1
+    );
+    assert_eq!(
+        after.local_action_serializations,
+        before.local_action_serializations
+    );
+    assert_eq!(
+        after.transport.submitted_parcels,
+        before.transport.submitted_parcels
+    );
+    shutdown_pair(&mut left, &mut right);
 }
 
 #[test]

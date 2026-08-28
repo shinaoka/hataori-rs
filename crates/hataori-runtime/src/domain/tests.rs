@@ -1,4 +1,5 @@
 use super::*;
+use crate::Segments;
 use crate::{action::ActionRegistry, Action, WireValue};
 use std::{
     sync::{Condvar, Mutex},
@@ -31,7 +32,7 @@ fn job(handler: RegisteredAction, sequence: u64) -> ActionJob {
         action_id: ActionId::new(Block::ID).unwrap(),
         domain: DomainId::DEFAULT,
         trace_id: None,
-        input: Vec::new(),
+        input: ActionValue::Encoded(Vec::new()),
         handler,
         cancelled: Arc::new(AtomicBool::new(false)),
         local: true,

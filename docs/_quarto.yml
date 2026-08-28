@@ -18,6 +18,7 @@ project:
     - phase-b-acceptance-ledger.md
     - phase-c-acceptance-ledger.md
     - phase-d-acceptance-ledger.md
+    - phase-e-acceptance-ledger.md
     - tenferro-acceptance-ledger.md
     - "!superpowers/**"
     - "!worklogs/**"
@@ -88,6 +89,8 @@ website:
             href: design/phase-c-objects.md
           - text: "Phase D explicit migration"
             href: design/phase-d-migration.md
+          - text: "Phase E algorithms and facade"
+            href: design/phase-e-algorithms.md
           - text: "tenferro adapter"
             href: design/tenferro-adapter.md
           - implementation-readiness.md
@@ -97,4 +100,5 @@ website:
           - phase-b-acceptance-ledger.md
           - phase-c-acceptance-ledger.md
           - phase-d-acceptance-ledger.md
+          - phase-e-acceptance-ledger.md
           - tenferro-acceptance-ledger.md

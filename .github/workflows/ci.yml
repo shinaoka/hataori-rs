@@ -50,6 +50,8 @@ jobs:
         run: scripts/check-phase-c-objects.sh
       - name: Check Phase D explicit object migration
         run: scripts/check-phase-d-migration.sh
+      - name: Check Phase E algorithms and facade correctness
+        run: scripts/check-phase-e-algorithms.sh
 
   tenferro-adapter:
     runs-on: ubuntu-latest

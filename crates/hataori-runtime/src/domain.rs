@@ -1,5 +1,5 @@
 use crate::{
-    action::{RegisteredAction, Segments},
+    action::{ActionValue, RegisteredAction},
     error::{ActionError, ResourceKind, RuntimeError},
 };
 use hataori_runtime_foundation::protocol::{
@@ -58,7 +58,7 @@ pub(crate) struct ActionJob {
     pub action_id: ActionId,
     pub domain: DomainId,
     pub trace_id: Option<TraceId>,
-    pub input: Segments,
+    pub input: ActionValue,
     pub handler: RegisteredAction,
     pub cancelled: Arc<AtomicBool>,
     pub local: bool,
@@ -72,7 +72,7 @@ pub(crate) struct ActionCompletion {
     pub action_id: ActionId,
     pub domain: DomainId,
     pub trace_id: Option<TraceId>,
-    pub result: Result<Segments, ActionError>,
+    pub result: Result<ActionValue, ActionError>,
     pub cancelled: bool,
     pub local: bool,
     pub object: Option<ObjectJob>,

@@ -331,3 +331,29 @@ Each independently mergeable implementation step in `docs/implementation-readine
   regression lanes. See `phase-d-acceptance-ledger.md` and the Phase D worklog.
 - External verdict status: **NOT OBTAINED — reviewer timeout; no claim of an
   independent Correct-to-merge verdict**.
+
+## Phase E algorithms design review record
+
+- Design: `docs/design/phase-e-algorithms.md`
+- Reviewer selected by the user: `reviewer-flash` (DeepSeek family, read-only,
+  `high`)
+- First bounded attempt exhausted its turn budget before reading the primary
+  document and received no gate credit.
+- Focused continuation reviewed the complete design against the Phase E,
+  placement, lowering, boundedness, and performance contracts.
+- Verdict: **Correct-to-merge**
+- Blocking findings: none.
+- Non-blocking clarifications fixed before implementation: explicitly defer
+  barriers/reductions and state boolean prefetch depth as one versus two
+  batches per target.
+- Gate status: **COMPLETE — Phase E implementation may start**.
+- Implementation: parent-owned runtime/facade integration plus a bounded
+  `luna-implementer` algorithms-crate slice completed by the parent after the
+  worker exhausted its turn budget.
+- Post-implementation reviewer: `reviewer-flash` (read-only, `high`); two broad
+  attempts timed out during evidence gathering, followed by one focused source
+  continuation.
+- Post-implementation verdict: **Correct-to-merge**; no blocking finding.
+- Reviewer caveat: the final bounded session did not re-read the complete
+  `batch.rs` tail, so parent preflight and deterministic algorithm/TCP/MPI gates
+  remain the evidence for that portion.

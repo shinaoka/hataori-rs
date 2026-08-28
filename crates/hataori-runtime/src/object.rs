@@ -1,5 +1,5 @@
 use crate::{
-    action::{Action, ActionRegistry, RegisteredAction, Segments},
+    action::{Action, ActionRegistry, ActionValue, RegisteredAction, Segments},
     domain::{ActionJob, ObjectJob},
     ActionError, Place, RemoteFuture, RuntimeClient, RuntimeError, SpawnOptions, WireValue,
 };
@@ -769,7 +769,7 @@ impl ObjectRegistry {
                 registration.output_schema,
                 RegisteredAction::new(move |segments| {
                     let (_, payload) = ObjectEnvelope::decode(segments)?;
-                    handler.execute(payload)
+                    handler.execute_encoded(payload)
                 }),
             )?;
         }
@@ -1180,8 +1180,16 @@ impl ObjectService {
         if registration.is_none() && !placement && !freeze {
             return Ok(Some(job));
         }
+        let encoded = match &job.input {
+            ActionValue::Encoded(segments) => segments,
+            ActionValue::Typed(_) => {
+                return Err(RuntimeError::Protocol(
+                    "object admission requires encoded input".into(),
+                ));
+            }
+        };
         let (object, object_type, epoch, migration) = if freeze {
-            let packet = MigrationPacket::decode(job.input.clone())
+            let packet = MigrationPacket::decode(encoded.clone())
                 .map_err(|error| RuntimeError::Protocol(error.message()))?;
             (
                 packet.object,
@@ -1190,7 +1198,7 @@ impl ObjectService {
                 Some(packet.migration),
             )
         } else {
-            let envelope = ObjectEnvelope::inspect(&job.input)
+            let envelope = ObjectEnvelope::inspect(encoded)
                 .map_err(|error| RuntimeError::Protocol(error.message()))?;
             (envelope.object, envelope.object_type, envelope.epoch, None)
         };

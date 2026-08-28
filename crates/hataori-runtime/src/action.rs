@@ -1,6 +1,7 @@
 use crate::error::{ActionError, RuntimeError};
 use hataori_runtime_foundation::protocol::ActionId;
 use std::{
+    any::Any,
     collections::BTreeMap,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::Arc,
@@ -20,11 +21,19 @@ pub trait Action: WireValue {
     type Output: WireValue;
 }
 
+pub(crate) enum ActionValue {
+    Encoded(Segments),
+    Typed(Box<dyn Any + Send>),
+}
+
 type Handler = dyn Fn(Segments) -> Result<Segments, ActionError> + Send + Sync;
+type LocalHandler =
+    dyn Fn(Box<dyn Any + Send>) -> Result<Box<dyn Any + Send>, ActionError> + Send + Sync;
 
 #[derive(Clone)]
 pub(crate) struct RegisteredAction {
     handler: Arc<Handler>,
+    local_handler: Option<Arc<LocalHandler>>,
 }
 
 impl std::fmt::Debug for RegisteredAction {
@@ -39,13 +48,32 @@ impl RegisteredAction {
     ) -> Self {
         Self {
             handler: Arc::new(handler),
+            local_handler: None,
         }
     }
 
-    pub(crate) fn execute(&self, input: Segments) -> Result<Segments, ActionError> {
-        match catch_unwind(AssertUnwindSafe(|| (self.handler)(input))) {
+    pub(crate) fn execute(&self, input: ActionValue) -> Result<ActionValue, ActionError> {
+        match catch_unwind(AssertUnwindSafe(|| match input {
+            ActionValue::Encoded(segments) => (self.handler)(segments).map(ActionValue::Encoded),
+            ActionValue::Typed(value) => self
+                .local_handler
+                .as_ref()
+                .ok_or_else(|| ActionError::codec("action has no typed local handler"))?(
+                value
+            )
+            .map(ActionValue::Typed),
+        })) {
             Ok(result) => result,
             Err(_) => Err(ActionError::Panic),
+        }
+    }
+
+    pub(crate) fn execute_encoded(&self, input: Segments) -> Result<Segments, ActionError> {
+        match self.execute(ActionValue::Encoded(input))? {
+            ActionValue::Encoded(output) => Ok(output),
+            ActionValue::Typed(_) => {
+                Err(ActionError::codec("encoded action returned typed output"))
+            }
         }
     }
 }
@@ -69,13 +97,22 @@ impl ActionRegistry {
         if self.entries.contains_key(&id) {
             return Err(RuntimeError::DuplicateAction(id));
         }
+        let handler = Arc::new(handler);
+        let remote = Arc::clone(&handler);
+        let local = Arc::clone(&handler);
         self.entries.insert(
             id,
             RegisteredAction {
                 handler: Arc::new(move |segments| {
                     let input = A::decode(segments)?;
-                    handler(input)?.encode()
+                    remote(input)?.encode()
                 }),
+                local_handler: Some(Arc::new(move |value| {
+                    let input = value
+                        .downcast::<A>()
+                        .map_err(|_| ActionError::codec("typed action input mismatch"))?;
+                    Ok(Box::new(local(*input)?) as Box<dyn Any + Send>)
+                })),
             },
         );
         self.schemas
@@ -93,9 +130,10 @@ impl ActionRegistry {
         if input_schema == 0 || output_schema == 0 {
             return Err(RuntimeError::InvalidSchema);
         }
-        if self.entries.insert(id, handler).is_some() {
+        if self.entries.contains_key(&id) {
             return Err(RuntimeError::DuplicateAction(id));
         }
+        self.entries.insert(id, handler);
         self.schemas.insert(id, (input_schema, output_schema));
         Ok(())
     }

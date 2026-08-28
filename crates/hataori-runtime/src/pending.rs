@@ -1,5 +1,5 @@
 use crate::{
-    action::{Segments, WireValue},
+    action::{ActionValue, WireValue},
     error::{ResourceKind, RuntimeError},
 };
 use hataori_runtime_foundation::protocol::{ActionId, DomainId, LocalityId, RequestId, TraceId};
@@ -17,7 +17,7 @@ use std::{
 };
 
 struct PromiseState {
-    result: Option<Result<Segments, RuntimeError>>,
+    result: Option<Result<ActionValue, RuntimeError>>,
     waker: Option<Waker>,
 }
 
@@ -37,7 +37,7 @@ impl Promise {
         }
     }
 
-    pub(crate) fn complete(&self, result: Result<Segments, RuntimeError>) {
+    pub(crate) fn complete(&self, result: Result<ActionValue, RuntimeError>) {
         let mut state = self.state.lock().unwrap();
         if state.result.is_none() && !self.done.load(Ordering::Acquire) {
             state.result = Some(result);
@@ -48,7 +48,7 @@ impl Promise {
         }
     }
 
-    fn poll(&self, context: &mut Context<'_>) -> Poll<Result<Segments, RuntimeError>> {
+    fn poll(&self, context: &mut Context<'_>) -> Poll<Result<ActionValue, RuntimeError>> {
         let mut state = self.state.lock().unwrap();
         if let Some(result) = state.result.take() {
             Poll::Ready(result)
@@ -202,11 +202,20 @@ impl<T: WireValue> Future for RemoteFuture<T> {
             panic!("RemoteFuture polled after completion");
         }
         match this.promise.poll(context) {
-            Poll::Ready(Ok(segments)) => {
+            Poll::Ready(Ok(ActionValue::Encoded(segments))) => {
                 this.finished = true;
                 Poll::Ready(T::decode(segments).map_err(|error| {
                     RuntimeError::Protocol(format!("action output decode failed: {error}"))
                 }))
+            }
+            Poll::Ready(Ok(ActionValue::Typed(value))) => {
+                this.finished = true;
+                Poll::Ready(
+                    value
+                        .downcast::<T>()
+                        .map(|value| *value)
+                        .map_err(|_| RuntimeError::Protocol("typed action output mismatch".into())),
+                )
             }
             Poll::Ready(Err(error)) => {
                 this.finished = true;

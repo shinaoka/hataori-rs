@@ -17,8 +17,10 @@ rules loaded through `AGENTS.md`.
   directory/resolver, lease/root, typed object-action, and placement boundary.
 - `docs/design/phase-d-migration.md` describes implemented manual migration,
   snapshot/restore, stable authority, epoch commit, redirect, rollback,
-  forwarding, retirement, and reconstructible-resource behavior; it does not
-  include automatic policy or rebuilt algorithms.
+  forwarding, retirement, and reconstructible-resource behavior.
+- `docs/design/phase-e-algorithms.md` describes implemented bounded batch
+  algorithms, action/future collectives, direct facades, and the still-pending
+  frozen performance acceptance gate; it does not include automatic policy.
 - Do not present a future-runtime capability as implemented until source,
   runnable examples, and tests provide it.
 - Backward compatibility with the current P0 API is not a design requirement

@@ -93,7 +93,7 @@ fn service() -> (Arc<ObjectService>, ObjectId, ObjectTypeId, ObjectLocation) {
     let location_bytes = service
         .create_handler(object_type)
         .unwrap()
-        .execute(
+        .execute_encoded(
             ObjectEnvelope {
                 object,
                 object_type,
@@ -119,7 +119,7 @@ fn directory_resolver_typed_calls_and_collection_are_bounded() {
         .action_handler(ActionId::new(Add::ID).unwrap())
         .unwrap();
     let output = add
-        .execute(
+        .execute_encoded(
             ObjectEnvelope {
                 object,
                 object_type,
@@ -143,7 +143,7 @@ fn stale_epoch_and_busy_writer_fail_without_blocking() {
     let get = service
         .action_handler(ActionId::new(Get::ID).unwrap())
         .unwrap();
-    let stale = get.execute(
+    let stale = get.execute_encoded(
         ObjectEnvelope {
             object,
             object_type,
@@ -168,7 +168,7 @@ fn stale_epoch_and_busy_writer_fail_without_blocking() {
         ErasedState::ReadWrite(state) => state.write().unwrap(),
         ErasedState::Exclusive(_) => unreachable!(),
     };
-    let busy = get.execute(
+    let busy = get.execute_encoded(
         ObjectEnvelope {
             object,
             object_type,
@@ -224,19 +224,21 @@ fn admission_runs_parallel_readers_then_writer_then_later_reader() {
         action_id: action,
         domain: location.domain(),
         trace_id: None,
-        input: ObjectEnvelope {
-            object,
-            object_type,
-            epoch: 1,
-            lease_locality: LocalityId::new(1),
-            domain: location.domain(),
-            rooted: false,
-        }
-        .encode(if action.get() == Add::ID {
-            Add(1).encode().unwrap()
-        } else {
-            Vec::new()
-        }),
+        input: ActionValue::Encoded(
+            ObjectEnvelope {
+                object,
+                object_type,
+                epoch: 1,
+                lease_locality: LocalityId::new(1),
+                domain: location.domain(),
+                rooted: false,
+            }
+            .encode(if action.get() == Add::ID {
+                Add(1).encode().unwrap()
+            } else {
+                Vec::new()
+            }),
+        ),
         handler: service.action_handler(action).unwrap(),
         cancelled: Arc::new(AtomicBool::new(false)),
         local: false,

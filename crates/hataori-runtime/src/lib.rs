@@ -16,6 +16,7 @@ mod wire;
 pub use action::{Action, Segments, WireValue};
 pub use domain::{DomainConfig, DomainStats};
 pub use error::{ActionError, ResourceKind, RuntimeError, RuntimeState};
+pub use hataori_runtime_foundation::protocol::{ActionId, DomainId, LocalityId};
 pub use object::{
     ColocatedFuture, CreateFuture, DistributedObject, LeaseTransfer, MigrationFuture,
     MigrationReport, MobileObject, Mobility, ObjectAccess, ObjectCallFuture, ObjectConcurrency,

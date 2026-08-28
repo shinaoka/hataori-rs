@@ -1,5 +1,5 @@
 use crate::{
-    action::{Action, ActionRegistry, Segments},
+    action::{Action, ActionRegistry, ActionValue, Segments},
     dedup::{DedupDisposition, DedupTable},
     domain::{ActionCompletion, ActionJob, DomainConfig, DomainRegistry, DomainStats},
     error::{cap, ResourceKind, RuntimeError, RuntimeState},
@@ -130,6 +130,8 @@ pub struct RuntimeStats {
     pub late_results: u64,
     pub duplicate_requests: u64,
     pub action_failures: u64,
+    pub local_typed_dispatches: u64,
+    pub local_action_serializations: u64,
     pub dedup_entries: usize,
     pub dedup_bytes: usize,
     pub sent_by_channel: [u64; 3],
@@ -426,6 +428,8 @@ struct SharedCounters {
     late_results: AtomicU64,
     duplicate_requests: AtomicU64,
     action_failures: AtomicU64,
+    local_typed_dispatches: AtomicU64,
+    local_action_serializations: AtomicU64,
     sent: [AtomicU64; 3],
     received: [AtomicU64; 3],
 }
@@ -446,6 +450,7 @@ enum TicketPurpose {
 
 struct LocalRequest {
     message: RuntimeMessage,
+    input: ActionValue,
     cancel_token: Arc<std::sync::atomic::AtomicBool>,
     trace_id: Option<TraceId>,
 }
@@ -768,10 +773,20 @@ impl RuntimeClient {
         options: SpawnOptions,
     ) -> Result<RemoteFuture<A::Output>, RuntimeError> {
         let action_id = ActionId::new(A::ID).map_err(|_| RuntimeError::InvalidActionId)?;
-        let payload = action
-            .encode()
-            .map_err(|error| RuntimeError::Protocol(format!("action encode failed: {error}")))?;
-        self.spawn_encoded(place, action_id, payload, options)
+        if place.locality == self.shared.local_id {
+            self.spawn_inner(
+                place,
+                action_id,
+                ActionValue::Typed(Box::new(action)),
+                options,
+                None,
+            )
+        } else {
+            let payload = action.encode().map_err(|error| {
+                RuntimeError::Protocol(format!("action encode failed: {error}"))
+            })?;
+            self.spawn_encoded(place, action_id, payload, options)
+        }
     }
 
     pub(crate) fn spawn_encoded<T: WireValue>(
@@ -781,7 +796,13 @@ impl RuntimeClient {
         payload: Segments,
         options: SpawnOptions,
     ) -> Result<RemoteFuture<T>, RuntimeError> {
-        self.spawn_encoded_inner(place, action_id, payload, options, None)
+        self.spawn_inner(
+            place,
+            action_id,
+            ActionValue::Encoded(payload),
+            options,
+            None,
+        )
     }
 
     pub(crate) fn spawn_encoded_retry<T: WireValue>(
@@ -792,14 +813,20 @@ impl RuntimeClient {
         options: SpawnOptions,
         request: RequestId,
     ) -> Result<RemoteFuture<T>, RuntimeError> {
-        self.spawn_encoded_inner(place, action_id, payload, options, Some(request))
+        self.spawn_inner(
+            place,
+            action_id,
+            ActionValue::Encoded(payload),
+            options,
+            Some(request),
+        )
     }
 
-    fn spawn_encoded_inner<T: WireValue>(
+    fn spawn_inner<T: WireValue>(
         &self,
         place: Place,
         action_id: ActionId,
-        payload: Segments,
+        input: ActionValue,
         options: SpawnOptions,
         request: Option<RequestId>,
     ) -> Result<RemoteFuture<T>, RuntimeError> {
@@ -809,6 +836,12 @@ impl RuntimeClient {
         }
         if self.shared.registry.get(action_id).is_none() {
             return Err(RuntimeError::UnknownAction(action_id));
+        }
+        let local = place.locality == self.shared.local_id;
+        if !local && matches!(&input, ActionValue::Typed(_)) {
+            return Err(RuntimeError::Protocol(
+                "typed action cannot cross a locality boundary".into(),
+            ));
         }
         let deadline_ms = u64::try_from(options.deadline.as_millis().max(1))
             .map_err(|_| RuntimeError::InvalidDeadline)?;
@@ -837,6 +870,15 @@ impl RuntimeClient {
                 cancel_token: cancel_token.clone(),
             },
         )?;
+        let mut input = Some(input);
+        let payload = if local {
+            Vec::new()
+        } else {
+            match input.take().unwrap() {
+                ActionValue::Encoded(payload) => payload,
+                ActionValue::Typed(_) => unreachable!("typed remote input rejected above"),
+            }
+        };
         let message = RuntimeMessage {
             kind: RuntimeMessageKind::Request,
             request,
@@ -845,11 +887,12 @@ impl RuntimeClient {
             deadline_ms,
             payload,
         };
-        let submitted = if place.locality == self.shared.local_id {
+        let submitted = if local {
             self.shared
                 .local_tx
                 .try_send(LocalRequest {
                     message,
+                    input: input.take().unwrap(),
                     cancel_token: cancel_token.unwrap(),
                     trace_id: options.trace_id,
                 })
@@ -1525,6 +1568,10 @@ impl Runtime {
         self.shared.local_id
     }
 
+    pub fn localities(&self) -> &[LocalityId] {
+        self.driver.members()
+    }
+
     pub fn state(&self) -> RuntimeState {
         self.shared.state()
     }
@@ -1722,9 +1769,10 @@ impl Runtime {
         })
     }
 
-    pub fn block_on<F, T>(&mut self, future: F) -> Result<T, RuntimeError>
+    pub fn block_on<F, T, E>(&mut self, future: F) -> Result<T, E>
     where
-        F: Future<Output = Result<T, RuntimeError>>,
+        F: Future<Output = Result<T, E>>,
+        E: From<RuntimeError>,
     {
         struct ThreadWake(std::thread::Thread);
         impl Wake for ThreadWake {
@@ -1744,7 +1792,7 @@ impl Runtime {
                 Ok(_) => std::thread::park_timeout(Duration::from_millis(1)),
                 Err(error) => {
                     self.fail(error.clone());
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         }
@@ -1764,6 +1812,16 @@ impl Runtime {
                 .duplicate_requests
                 .load(Ordering::Relaxed),
             action_failures: self.shared.counters.action_failures.load(Ordering::Relaxed),
+            local_typed_dispatches: self
+                .shared
+                .counters
+                .local_typed_dispatches
+                .load(Ordering::Relaxed),
+            local_action_serializations: self
+                .shared
+                .counters
+                .local_action_serializations
+                .load(Ordering::Relaxed),
             dedup_entries: self.dedup.len(),
             dedup_bytes: self.dedup.retained_bytes(),
             sent_by_channel: std::array::from_fn(|index| {
@@ -1897,6 +1955,18 @@ impl Runtime {
     }
 
     fn dispatch_local(&mut self, request: LocalRequest) -> Result<(), RuntimeError> {
+        match &request.input {
+            ActionValue::Typed(_) => self
+                .shared
+                .counters
+                .local_typed_dispatches
+                .fetch_add(1, Ordering::Relaxed),
+            ActionValue::Encoded(_) => self
+                .shared
+                .counters
+                .local_action_serializations
+                .fetch_add(1, Ordering::Relaxed),
+        };
         let request_id = request.message.request;
         let action_id = request.message.action;
         let result = self
@@ -1913,7 +1983,7 @@ impl Runtime {
                     action_id,
                     domain,
                     trace_id: request.trace_id,
-                    input: request.message.payload,
+                    input: request.input,
                     handler,
                     cancelled: request.cancel_token,
                     local: true,
@@ -2090,7 +2160,7 @@ impl Runtime {
                     action_id: message.action,
                     domain: message.domain,
                     trace_id,
-                    input: message.payload.clone(),
+                    input: ActionValue::Encoded(message.payload.clone()),
                     handler,
                     cancelled,
                     local: false,
@@ -2201,7 +2271,12 @@ impl Runtime {
             (RuntimeMessageKind::Cancelled, Vec::new())
         } else {
             match completion.result {
-                Ok(payload) => (RuntimeMessageKind::Success, payload),
+                Ok(ActionValue::Encoded(payload)) => (RuntimeMessageKind::Success, payload),
+                Ok(ActionValue::Typed(_)) => {
+                    return Err(RuntimeError::Protocol(
+                        "remote action produced typed output".into(),
+                    ));
+                }
                 Err(error) => {
                     self.shared
                         .counters
@@ -2240,7 +2315,9 @@ impl Runtime {
             .take_checked(message.request, source, message.action)?
         {
             Some(entry) => {
-                entry.promise.complete(map(message));
+                entry
+                    .promise
+                    .complete(map(message).map(ActionValue::Encoded));
                 self.shared
                     .counters
                     .completed

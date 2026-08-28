@@ -1,6 +1,6 @@
 # Hataori distributed runtime architecture
 
-**Status:** Accepted long-term direction; phases A-D protocol, transport, structured runtime, remote objects, and explicit migration implemented; Phase E not implemented
+**Status:** Accepted long-term direction; phases A-D and Phase E algorithm/facade correctness implemented; Phase E performance acceptance pending a valid-host PASS report
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
@@ -36,8 +36,9 @@ MPI transport described below. The unpublished `hataori-runtime` crate implement
 lifecycle and structured execution described in
 [`phase-b-runtime.md`](phase-b-runtime.md), the Phase C remote-object boundary
 in [`phase-c-objects.md`](phase-c-objects.md), and Phase D explicit migration in
-[`phase-d-migration.md`](phase-d-migration.md). Rebuilt algorithms remain
-unimplemented.
+[`phase-d-migration.md`](phase-d-migration.md), and the Phase E algorithm/facade
+boundary in [`phase-e-algorithms.md`](phase-e-algorithms.md). The frozen Phase E
+performance gate remains pending.
 
 The long-term system is a long-lived Rust distributed runtime. It should support:
 
@@ -978,6 +979,10 @@ Implemented in `hataori-runtime` and detailed in
   without transferring executor or context identity.
 
 ### Phase E: algorithms and policy
+
+Implemented algorithm/facade correctness is detailed in
+[`phase-e-algorithms.md`](phase-e-algorithms.md); performance promotion remains
+blocked until every frozen case passes on a valid host.
 
 - rebuild `pmap` and collectives over actions/futures;
 - implement the current-style facade and blocking entry, both lowering directly

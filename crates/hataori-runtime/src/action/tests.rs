@@ -58,6 +58,11 @@ fn fingerprint_is_registration_order_independent_and_ids_are_unique() {
         left.register::<Collision, _>(|_| Ok(())),
         Err(RuntimeError::DuplicateAction(_))
     ));
+    let first = left.get(ActionId::new(First::ID).unwrap()).unwrap();
+    assert_eq!(
+        first.execute_encoded(First(7).encode().unwrap()),
+        Ok(7_u64.encode().unwrap())
+    );
 }
 
 #[test]
@@ -68,11 +73,11 @@ fn erased_dispatch_catches_panics_and_preserves_codec_errors() {
         .unwrap();
     let handler = registry.get(ActionId::new(First::ID).unwrap()).unwrap();
     assert_eq!(
-        handler.execute(First(1).encode().unwrap()),
+        handler.execute_encoded(First(1).encode().unwrap()),
         Err(ActionError::Panic)
     );
     assert!(matches!(
-        handler.execute(Vec::new()),
+        handler.execute_encoded(Vec::new()),
         Err(ActionError::Codec(_))
     ));
 }
