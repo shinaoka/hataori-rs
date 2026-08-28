@@ -36,8 +36,12 @@ fi
 
 run_group 30 cargo run -p hataori-runtime --bin tcp_runtime_smoke
 run_group 30 cargo build -p hataori-runtime --no-default-features --features mpi --bin mpi_runtime_smoke
+mpi_flags=()
+if mpiexec --version 2>&1 | grep -Eq 'Open MPI|OpenRTE'; then
+    mpi_flags+=(--oversubscribe)
+fi
 for n in 1 2 4; do
-    run_group 20 mpiexec -n "$n" target/debug/mpi_runtime_smoke
+    run_group 20 mpiexec "${mpi_flags[@]}" -n "$n" target/debug/mpi_runtime_smoke
 done
 
 git diff --check

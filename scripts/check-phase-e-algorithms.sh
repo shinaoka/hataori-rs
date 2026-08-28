@@ -13,7 +13,11 @@ run 30 cargo +1.85.0 check -p hataori-runtime -p hataori-algorithms
 run 30 cargo check --features runtime
 run 30 cargo run -p hataori-runtime --bin tcp_runtime_smoke
 run 30 cargo build -p hataori-runtime --features mpi --bin mpi_runtime_smoke
-for n in 1 2 4; do run 20 env -u DISPLAY mpiexec -n "$n" target/debug/mpi_runtime_smoke; done
+mpi_flags=()
+if mpiexec --version 2>&1 | grep -Eq 'Open MPI|OpenRTE'; then
+    mpi_flags+=(--oversubscribe)
+fi
+for n in 1 2 4; do run 20 env -u DISPLAY mpiexec "${mpi_flags[@]}" -n "$n" target/debug/mpi_runtime_smoke; done
 if grep -REn 'todo!|unimplemented!|TODO|FIXME|unsafe impl[[:space:]]+(Send|Sync)' crates/hataori-algorithms/src crates/hataori-runtime/src; then exit 1; fi
 scripts/check-performance-manifest.py
 git diff --check
