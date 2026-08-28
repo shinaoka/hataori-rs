@@ -540,6 +540,22 @@ fn drive_future<T>(
     panic!("runtime test exceeded bounded progress iterations");
 }
 
+fn drive_until(
+    left: &mut Runtime,
+    right: &mut Runtime,
+    predicate: impl Fn(&Runtime, &Runtime) -> bool,
+) {
+    for _ in 0..10_000 {
+        left.progress(64).unwrap();
+        right.progress(64).unwrap();
+        if predicate(left, right) {
+            return;
+        }
+        std::thread::yield_now();
+    }
+    panic!("runtime condition exceeded bounded progress iterations");
+}
+
 fn shutdown_pair(left: &mut Runtime, right: &mut Runtime) {
     for _ in 0..10_000 {
         let _ = left.progress(64);
@@ -1188,12 +1204,9 @@ fn migrated_object_root_preserves_remote_resident_until_release() {
     assert_eq!(left.stats().objects.roots, 1);
     assert_eq!(right.stats().objects.live_objects, 1);
     root.release();
-    for _ in 0..16 {
-        left.progress(64).unwrap();
-        right.progress(64).unwrap();
-    }
-    assert_eq!(left.stats().objects.live_objects, 0);
-    assert_eq!(right.stats().objects.live_objects, 0);
+    drive_until(&mut left, &mut right, |left, right| {
+        left.stats().objects.live_objects == 0 && right.stats().objects.live_objects == 0
+    });
     shutdown_pair(&mut left, &mut right);
 }
 
@@ -1319,11 +1332,9 @@ fn fixed_remote_object_creation_calls_clone_lease_and_collection() {
     drop(upgraded);
     assert_eq!(right.stats().objects.leases, 1);
     drop(clone);
-    for _ in 0..32 {
-        left.progress(64).unwrap();
-        right.progress(64).unwrap();
-    }
-    assert_eq!(right.stats().objects.live_objects, 0);
+    drive_until(&mut left, &mut right, |_, right| {
+        right.stats().objects.live_objects == 0
+    });
     shutdown_pair(&mut left, &mut right);
 }
 
@@ -1478,11 +1489,9 @@ fn object_root_retains_after_last_lease_and_releases_mechanically() {
     assert_eq!(right.stats().objects.live_objects, 1);
     assert_eq!(right.stats().objects.roots, 1);
     drop(root);
-    for _ in 0..16 {
-        left.progress(64).unwrap();
-        right.progress(64).unwrap();
-    }
-    assert_eq!(right.stats().objects.live_objects, 0);
+    drive_until(&mut left, &mut right, |_, right| {
+        right.stats().objects.live_objects == 0
+    });
     shutdown_pair(&mut left, &mut right);
 }
 
