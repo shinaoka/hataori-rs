@@ -1,5 +1,6 @@
 target/
 Cargo.lock
+!benchmarks/legacy-runner/Cargo.lock
 .codegraph/
 mandelbrot_raw.png
 mandelbrot_pmap.png

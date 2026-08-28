@@ -34,11 +34,37 @@ belong in this repository.
 ## Current status
 
 Hataori's synchronous P0 core and P1 bounded-prefetch extension are implemented.
-The long-term distributed-runtime architecture is a forward-looking design and
-does not describe the current public API. Read both:
+The unpublished `hataori-runtime-foundation` crate implements Issue #14 Phase A
+protocol and transport infrastructure. The unpublished `hataori-runtime` crate
+implements Phase B lifecycle, domains, typed actions/futures, scopes,
+deadlines, cancellation, bounded deduplication, observability, and shutdown,
+plus Phase C fixed-placement remote objects, Phase D explicit migration, and
+Phase E bounded batch algorithms, action/future collectives, and direct runtime
+facades. Phase E performance acceptance remains blocked until the frozen suite
+passes on a valid measurement host.
+Read:
 
 - `docs/design.md` for the implemented P0 architecture;
-- `docs/design/distributed-runtime.md` for the proposed long-term architecture.
+- `docs/design/phase-a-transport-foundation.md` for Phase A;
+- `docs/design/phase-b-runtime.md` for Phase B;
+- `docs/design/phase-c-objects.md` for Phase C;
+- `docs/design/phase-d-migration.md` for Phase D;
+- `docs/design/phase-e-algorithms.md` for Phase E;
+- `docs/design/distributed-runtime.md` for the complete long-term architecture.
 
 For changes that establish or revise durable architecture, update the design
 document and add a concise reviewer-facing work log under `docs/worklogs/`.
+
+## Local command watchdogs
+
+- Every agent-run build, test, smoke, or backend process uses a short
+  process-group watchdog: normally at most 30 seconds, and at most 60 seconds
+  for MPI or a bounded integration stage. Split a longer matrix into stages;
+  do not remove or merely inflate the watchdog. Use `setsid timeout
+  --signal=TERM --kill-after=2s` for commands that may leave descendants, and
+  verify that no child process remains after a timeout.
+- A guard-backed submission permit holds a non-reentrant mutex until it is
+  committed or dropped. Tests and production code must not call another gated
+  reservation while retaining such a permit: that is a same-thread
+  self-deadlock. Commit/drop the first permit before the next reservation, and
+  run lock/concurrency tests under the short watchdog above.

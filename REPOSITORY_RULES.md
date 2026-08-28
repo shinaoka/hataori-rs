@@ -7,8 +7,20 @@ rules loaded through `AGENTS.md`.
 
 - `docs/design.md` describes the implemented synchronous P0 architecture.
 - `docs/design/bounded-prefetch.md` describes the implemented P1 extension.
-- `docs/design/distributed-runtime.md` describes the accepted direction for a
-  future long-lived distributed runtime.
+- `docs/design/distributed-runtime.md` describes the accepted long-term runtime
+  and records which phases are implemented.
+- `docs/design/phase-a-transport-foundation.md` describes the implemented
+  unpublished Phase A protocol and transport boundary.
+- `docs/design/phase-b-runtime.md` describes the implemented unpublished Phase B
+  lifecycle, typed-action, future, scope, deduplication, and shutdown boundary.
+- `docs/design/phase-c-objects.md` describes the implemented pinned-object,
+  directory/resolver, lease/root, typed object-action, and placement boundary.
+- `docs/design/phase-d-migration.md` describes implemented manual migration,
+  snapshot/restore, stable authority, epoch commit, redirect, rollback,
+  forwarding, retirement, and reconstructible-resource behavior.
+- `docs/design/phase-e-algorithms.md` describes implemented bounded batch
+  algorithms, action/future collectives, direct facades, and the still-pending
+  frozen performance acceptance gate; it does not include automatic policy.
 - Do not present a future-runtime capability as implemented until source,
   runnable examples, and tests provide it.
 - Backward compatibility with the current P0 API is not a design requirement

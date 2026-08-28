@@ -1,4 +1,4 @@
-//! Hataori: synchronous serial, Rayon, and MPI data-parallel execution.
+//! Hataori: local data parallelism and an optional long-lived distributed runtime.
 
 mod domain;
 #[cfg(feature = "rayon")]
@@ -21,13 +21,40 @@ pub use domain::{
 };
 #[cfg(feature = "rayon")]
 pub use domain::{DomainBuildError, PlacementStatus, PoolOwnership};
+#[cfg(feature = "runtime")]
+pub use hataori_algorithms as algorithms;
+#[cfg(feature = "runtime")]
+pub use hataori_algorithms::{
+    pmap, pmap_at, pmap_colocated, pmap_preferred_colocated, AlgorithmError, AlgorithmRegistryExt,
+    BatchActionToken, CollectiveRegistryExt, CollectiveToken, ControllerStats, PmapFuture,
+    PmapOptions,
+};
+#[cfg(feature = "runtime")]
+pub use hataori_runtime as runtime;
+
+#[cfg(feature = "runtime")]
+pub mod blocking {
+    use super::{algorithms, runtime};
+
+    pub fn pmap<A: runtime::Action>(
+        runtime: &mut runtime::Runtime,
+        options: algorithms::PmapOptions,
+        items: Vec<A>,
+        token: algorithms::BatchActionToken<A>,
+    ) -> Result<(Vec<A::Output>, algorithms::ControllerStats), algorithms::AlgorithmError> {
+        let future = algorithms::pmap(runtime, options, items, token)?;
+        runtime.block_on(future)
+    }
+}
 #[cfg(feature = "rayon")]
 pub use local::{map_in, MapInError};
 pub use map::{map, MapError};
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
 pub use placement::{broadcast, gather, scatter, PlacementError, PlacementErrorKind};
+#[cfg(all(any(feature = "mpi", feature = "rsmpi-rt"), not(feature = "runtime")))]
+pub use pmap::{pmap, PmapOptions};
 #[cfg(any(feature = "mpi", feature = "rsmpi-rt"))]
-pub use pmap::{pmap, PmapError, PmapErrorKind, PmapOptions};
+pub use pmap::{PmapError, PmapErrorKind};
 
 #[cfg(all(feature = "mpi", feature = "rsmpi-rt"))]
 compile_error!("hataori: features `mpi` and `rsmpi-rt` are mutually exclusive");

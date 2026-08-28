@@ -1,0 +1,205 @@
+schema_version = 1
+baseline_commit = "34cb1b1371c8b2f8ef750e2d49d10f9ef8f0782e"
+manifest_status = "frozen-before-candidate"
+
+[experiment]
+build_profile = "release"
+warmups = 5
+repetitions = 30
+calibration_pairs = 30
+pair_order = "alternating-baseline-candidate-with-balanced-first-run"
+timeout_seconds = 300
+selective_retries = false
+outlier_removal = false
+candidate_may_modify_manifest = false
+
+[statistics]
+confidence = 0.95
+one_sided_normal_quantile = 1.6448536269514722
+ratio_transform = "natural-log"
+case_point_estimator = "geometric-mean-paired-ratio"
+case_upper_bound = "exp(mean(log(candidate/baseline)) + z * sample_sd / sqrt(n))"
+baseline_noise_tolerance = "max(0, calibration_one_sided_95_percent_upper_bound - 1)"
+tolerance_cap = 0.02
+invalid_or_noisy_classification = "INCONCLUSIVE"
+failed_gate_classification = "FAIL"
+
+[acceptance]
+latency_upper_bound = "1 + tolerance"
+primary_geometric_mean_point_estimate_max = 1.00
+throughput_lower_bound = "1 - tolerance"
+scaling_efficiency_lower_bound = "1 - tolerance"
+peak_incremental_memory_upper_bound = "1 + tolerance"
+correctness_required = true
+boundedness_required = true
+leak_free_shutdown_required = true
+same_locality_serializations_max = 0
+same_locality_transport_messages_max = 0
+sugar_extra_payload_copies_max = 0
+sugar_extra_serializations_max = 0
+sugar_extra_parcel_sequences_max = 0
+sugar_extra_queue_hops_max = 0
+sugar_extra_per_item_allocations_max = 0
+sugar_extra_per_item_resolver_lookups_max = 0
+
+[host]
+required_metadata = [
+  "hostname", "os", "kernel", "architecture", "cpu_model", "logical_cpus",
+  "physical_cores", "memory_bytes", "rustc_version", "cargo_version",
+  "mpi_implementation", "mpi_version", "network_path", "cpu_affinity",
+  "thread_settings", "provider_settings", "governor", "candidate_commit",
+  "benchmark_source_commit", "manifest_sha256"
+]
+max_load_per_logical_cpu = 0.25
+swap_activity_allowed = false
+cpu_affinity_required = true
+fixed_cpu_governor_required = true
+thermal_throttling_allowed = false
+frequency_or_temperature_observations_required_when_available = true
+world_size_8_required_when_declared_host_has_8_slots = true
+failed_or_missing_required_observation = "INCONCLUSIVE"
+
+[tcp_targets.loopback]
+max_p95_round_trip_latency_us = 500
+min_large_payload_throughput_mib_s = 250
+min_four_locality_scaling_efficiency = 0.70
+
+[tcp_targets.lan_1gbe_or_better]
+max_p95_round_trip_latency_us = 2000
+min_large_payload_throughput_mib_s = 80
+min_four_locality_scaling_efficiency = 0.60
+
+[[case]]
+id = "local-map"
+comparisons = ["legacy-continuity", "sugar-transparency"]
+backends = ["local"]
+operations = ["map"]
+items = [16, 4096, 1048576]
+payload_bytes = [16]
+work = [1, 100]
+primary = true
+metrics = ["latency_ns", "throughput_items_s", "peak_incremental_bytes", "checksum"]
+
+[[case]]
+id = "rayon-map-in"
+comparisons = ["legacy-continuity", "sugar-transparency"]
+backends = ["rayon"]
+operations = ["map-in"]
+items = [16, 4096, 1048576]
+payload_bytes = [16]
+work = [1, 100]
+threads = [1, 2, 4]
+local_modes = ["sequential", "outer", "inner"]
+primary = true
+metrics = ["latency_ns", "throughput_items_s", "scaling_efficiency", "peak_incremental_bytes", "checksum"]
+
+[[case]]
+id = "mpi-pmap"
+comparisons = ["legacy-continuity", "sugar-transparency"]
+backends = ["mpi"]
+operations = ["pmap"]
+world_sizes = [1, 2, 4, 8]
+items = [1, 64, 10000]
+payload_bytes = [16, 1048576]
+work = [1, 1000]
+batch_sizes = [1, 10, 256]
+local_modes = ["sequential"]
+prefetch = [false]
+primary = true
+metrics = ["latency_ns", "throughput_items_s", "scaling_efficiency", "peak_incremental_bytes", "checksum", "ordered_results"]
+
+[[case]]
+id = "hybrid-pmap"
+comparisons = ["legacy-continuity", "sugar-transparency"]
+backends = ["mpi-rayon"]
+operations = ["pmap"]
+world_sizes = [1, 2, 4, 8]
+threads = [1, 2, 4]
+items = [16, 10000]
+payload_bytes = [16, 1048576]
+work = [1, 1000]
+batch_sizes = [1, 10, 256]
+local_modes = ["sequential", "outer", "inner"]
+prefetch = [false, true]
+primary = true
+metrics = ["latency_ns", "throughput_items_s", "scaling_efficiency", "peak_incremental_bytes", "checksum", "ordered_results"]
+
+[[case]]
+id = "mpi-collectives"
+comparisons = ["legacy-continuity", "sugar-transparency"]
+backends = ["mpi"]
+operations = ["broadcast", "scatter", "gather"]
+world_sizes = [1, 2, 4, 8]
+items = [1, 64]
+payload_bytes = [16, 1048576]
+work = [1]
+primary = true
+metrics = ["latency_ns", "throughput_bytes_s", "peak_incremental_bytes", "checksum"]
+
+[[case]]
+id = "runtime-reuse"
+comparisons = ["legacy-continuity", "sugar-transparency", "tcp-absolute"]
+backends = ["mpi", "tcp"]
+operations = ["repeated-pmap"]
+world_sizes = [1, 2, 4]
+invocations = [100]
+items = [64]
+payload_bytes = [16]
+work = [1]
+batch_sizes = [1, 10]
+primary = true
+metrics = ["steady_state_latency_ns", "bootstrap_latency_ns", "shutdown_latency_ns", "retained_bytes", "live_resources"]
+
+[[case]]
+id = "segmented-transfer"
+comparisons = ["sugar-transparency", "tcp-absolute"]
+backends = ["mpi", "tcp"]
+operations = ["parcel-round-trip"]
+world_sizes = [2, 4]
+payload_bytes = [1048576, 8388608]
+primary = true
+metrics = ["p95_round_trip_latency_us", "throughput_bytes_s", "peak_incremental_bytes", "segments", "checksum"]
+
+[[case]]
+id = "same-locality-fast-path"
+comparisons = ["sugar-transparency"]
+backends = ["memory", "mpi", "tcp"]
+operations = ["local-batch"]
+items = [1, 64]
+payload_bytes = [16, 1048576]
+batch_sizes = [1, 10]
+primary = true
+metrics = ["latency_ns", "payload_copies", "serializations", "transport_messages", "queue_hops"]
+
+[[case]]
+id = "object-placement"
+comparisons = ["sugar-transparency", "tcp-absolute"]
+backends = ["memory", "mpi", "tcp"]
+operations = ["exact-placement", "preferred-placement", "resolver-cache-hit", "redirect"]
+world_sizes = [2, 4]
+items = [1, 64]
+payload_bytes = [16, 1048576]
+batch_sizes = [1, 10]
+primary = false
+metrics = ["latency_ns", "throughput_items_s", "resolver_lookups", "redirects", "pending_promises", "retained_bytes"]
+
+[[case]]
+id = "object-concurrency"
+comparisons = ["sugar-transparency", "tcp-absolute"]
+backends = ["memory", "mpi", "tcp"]
+operations = ["parallel-readers", "exclusive-writer", "saturated-affinity-queue"]
+world_sizes = [2, 4]
+threads = [2, 4]
+items = [64, 4096]
+payload_bytes = [16]
+primary = false
+metrics = ["latency_ns", "throughput_items_s", "queue_wait_ns", "admission_failures", "retained_bytes"]
+
+[[case]]
+id = "runtime-cleanup"
+comparisons = ["sugar-transparency", "tcp-absolute"]
+backends = ["memory", "mpi", "tcp"]
+operations = ["success", "error", "timeout", "cancellation", "peer-failure", "shutdown"]
+world_sizes = [2, 4]
+primary = false
+metrics = ["shutdown_latency_ns", "live_objects", "leases", "pending_calls", "queued_parcels", "detached_tasks", "pins", "cache_entries", "retained_bytes"]

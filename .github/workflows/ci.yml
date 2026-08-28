@@ -40,6 +40,18 @@ jobs:
           scripts/check-core.sh \
             "$RUNNER_TEMP/mpiwrapper-install/lib/libmpiwrapper.so" \
             966f4231c96153a08295fc7d0bcbd65e916a73fd
+      - name: Check immutable legacy performance runner
+        run: scripts/check-legacy-runner.sh
+      - name: Check Phase A runtime foundation
+        run: scripts/check-runtime-foundation.sh
+      - name: Check Phase B runtime and structured execution
+        run: scripts/check-phase-b-runtime.sh
+      - name: Check Phase C fixed-placement remote objects
+        run: scripts/check-phase-c-objects.sh
+      - name: Check Phase D explicit object migration
+        run: scripts/check-phase-d-migration.sh
+      - name: Check Phase E algorithms and facade correctness
+        run: scripts/check-phase-e-algorithms.sh
 
   tenferro-adapter:
     runs-on: ubuntu-latest

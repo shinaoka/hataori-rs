@@ -1,0 +1,13 @@
+[package]
+name = "hataori-algorithms"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+hataori-runtime = { path = "../hataori-runtime" }
+rayon = "1.10"
+
+[dev-dependencies]
+hataori-runtime-foundation = { path = "../hataori-runtime-foundation" }

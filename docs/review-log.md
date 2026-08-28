@@ -244,6 +244,49 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Post-implementation verdict: **Correct-to-merge**
 - Blocking findings: none
 
+### Phase A-1 — immutable legacy performance runner
+
+- Design slice: `docs/design/legacy-performance-runner.md`
+- Reviewer selected by user: `reviewer-flash` (DeepSeek family, read-only, `high`; `reviewer-flash-opencode-go` was unavailable)
+- Initial attempt: timed out before producing a verdict; no gate credit was assigned.
+- Exact-state retry verdict: **Correct-to-merge**
+- Blocking findings: none
+- Verified: immutable full-SHA Hataori pin plus lockfile guard, operation-only timing, deterministic value-dependent workload/checksum, MPI/Rayon feature compatibility, raw-record integrity, bounded smoke coverage, and an explicit block on candidate measurements until the next manifest/statistics slice lands.
+- Non-blocking implementation notes: pin the runner's direct MPI dependency exactly to `=0.8.1`, include one world-size-two hybrid smoke case, and include the warmup count in each raw record.
+- Gate status: **COMPLETE — Phase A-1 implementation may start**
+- Implementer: `luna-implementer` (GPT family, write-capable) began the runner slice; after two bounded timeouts, the parent completed integration under the same approved design.
+- Implementation verification: all four feature sets passed tests and clippy with `-D warnings`; all four passed Rust 1.85 checks; `scripts/check-legacy-runner.sh` passed serial, all Rayon modes, MPI world sizes one/two, all placement helpers, and two-rank prefetched hybrid `pmap` with process-group watchdogs.
+- Post-implementation reviewer: `reviewer-flash` (DeepSeek family, read-only, `high`)
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none
+- Non-blocking notes, with no extra review round requested: align the design's sample record/input wording, strengthen later orchestrator field validation, avoid misleading mpi-only thread metadata, and make hosted MPI absence fail closed when the manifest/orchestrator slice adds an explicit CI mode.
+- Gate status: **COMPLETE — Phase A-1 is ready to merge**
+
+### Phase A-2/3 — protocol and transport foundation
+
+- Design slice: `docs/design/phase-a-transport-foundation.md` and Phase A
+  requirements in `docs/design/distributed-runtime.md` §§15.3/20/21.
+- Reviewer selected by user: `reviewer-flash` (DeepSeek family, read-only,
+  `high`; `reviewer-flash-opencode-go` was unavailable).
+- Post-implementation review: two 60-second evidence attempts expired without
+  a verdict; no gate credit was assigned. The same required review then read
+  the exact remaining implementation ranges under a bounded continuation.
+- Post-implementation verdict: **Correct-to-merge**
+- Blocking findings: none.
+- Verified: shared atomic close/reservation/RAII rollback, exact queue/byte
+  accounting, TCP partial-frame and partial-write bounds, terminal cleanup,
+  MPI chunk/reassembly bounds, and backend release paths.
+- Non-blocking finding fixed before submission: an unreachable-after-validation
+  MPI encode failure now preserves the ticket/reservation, releases accounting,
+  and emits `SendFailed`, matching TCP. A focused regression test preserves
+  the release metadata. Per the selected minimal-review policy, a non-blocking
+  fix does not trigger another review round.
+- Verification: `scripts/check-runtime-foundation.sh` passed 30 MPI-feature
+  unit tests, default/MPI clippy, rustdoc, Rust 1.85, backend scanners, TCP
+  smoke, and MPI n=1/2/4; the bounded core matrix, immutable runner,
+  performance manifest, and rendered docs also passed.
+- Gate status: **COMPLETE — Phase A-2/3 is ready to merge**
+
 ### P1 — bounded prefetch
 
 - Design slice: `docs/design/bounded-prefetch.md` plus the P1 amendments in `docs/design.md` and `docs/implementation-readiness.md`
@@ -266,3 +309,51 @@ Each independently mergeable implementation step in `docs/implementation-readine
 - Blocking findings: none
 - Non-blocking coverage findings fixed before submission: execute the upstream MPI-only smoke rather than compile it only; exercise prefetched batch size greater than one; assert a corrupt current ID leaves prefetched metadata and pending work unchanged.
 - Retained non-blocking notes: direct abort(75) conservatively covers a few no-successor cases, and the deterministic overlap handshake may have both adjacent callbacks waiting on the same task-transfer marker; neither weakens the contract.
+
+## Phase D explicit migration review record
+
+- Design: `docs/design/phase-d-migration.md`
+- Reviewer selected by the user: `reviewer-flash` (DeepSeek family, read-only,
+  `high`)
+- Review attempts: two 60-second bounded consultations. Both stopped during
+  evidence gathering before reading the complete design and produced **no
+  verdict**. Neither attempt is recorded as review-gate credit, and neither
+  reported a certified blocking finding.
+- Implementation owner: parent agent; no implementation was delegated while
+  the design lacked a reviewer verdict.
+- Parent preflight corrections before final validation: preserve a migration
+  lease pin; close admission behind placement tickets; prevent prepared-slot
+  collection during activation; release redirect dedup state before same-ID
+  retry; preserve authority lifetime across repeated migration; retire remote
+  residents after final lease/root release; recover dropped freezes by TTL;
+  reject snapshots that exceed protocol segment/byte limits.
+- Verification: `scripts/check-phase-d-migration.sh` plus Phase A-C/core/docs
+  regression lanes. See `phase-d-acceptance-ledger.md` and the Phase D worklog.
+- External verdict status: **NOT OBTAINED — reviewer timeout; no claim of an
+  independent Correct-to-merge verdict**.
+
+## Phase E algorithms design review record
+
+- Design: `docs/design/phase-e-algorithms.md`
+- Reviewer selected by the user: `reviewer-flash` (DeepSeek family, read-only,
+  `high`)
+- First bounded attempt exhausted its turn budget before reading the primary
+  document and received no gate credit.
+- Focused continuation reviewed the complete design against the Phase E,
+  placement, lowering, boundedness, and performance contracts.
+- Verdict: **Correct-to-merge**
+- Blocking findings: none.
+- Non-blocking clarifications fixed before implementation: explicitly defer
+  barriers/reductions and state boolean prefetch depth as one versus two
+  batches per target.
+- Gate status: **COMPLETE — Phase E implementation may start**.
+- Implementation: parent-owned runtime/facade integration plus a bounded
+  `luna-implementer` algorithms-crate slice completed by the parent after the
+  worker exhausted its turn budget.
+- Post-implementation reviewer: `reviewer-flash` (read-only, `high`); two broad
+  attempts timed out during evidence gathering, followed by one focused source
+  continuation.
+- Post-implementation verdict: **Correct-to-merge**; no blocking finding.
+- Reviewer caveat: the final bounded session did not re-read the complete
+  `batch.rs` tail, so parent preflight and deterministic algorithm/TCP/MPI gates
+  remain the evidence for that portion.

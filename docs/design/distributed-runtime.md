@@ -1,6 +1,6 @@
 # Hataori distributed runtime architecture
 
-**Status:** Accepted long-term direction; implementation has not started
+**Status:** Accepted long-term direction; phases A-D and Phase E algorithm/facade correctness implemented; Phase E performance acceptance pending a valid-host PASS report
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
@@ -29,6 +29,16 @@ engine over MPI and rank-local Rayon domains. Its root coordinator dynamically
 distributes fixed input batches and returns ordered results. That design remains
 documented in [`../design.md`](../design.md) and
 [`bounded-prefetch.md`](bounded-prefetch.md).
+
+The unpublished `hataori-runtime-foundation` workspace crate implements the
+Phase A protocol, deterministic memory backend, TCP rendezvous/transport, and
+MPI transport described below. The unpublished `hataori-runtime` crate implements the Phase B owner-thread
+lifecycle and structured execution described in
+[`phase-b-runtime.md`](phase-b-runtime.md), the Phase C remote-object boundary
+in [`phase-c-objects.md`](phase-c-objects.md), and Phase D explicit migration in
+[`phase-d-migration.md`](phase-d-migration.md), and the Phase E algorithm/facade
+boundary in [`phase-e-algorithms.md`](phase-e-algorithms.md). The frozen Phase E
+performance gate remains pending.
 
 The long-term system is a long-lived Rust distributed runtime. It should support:
 
@@ -769,8 +779,11 @@ fast path may use backend capabilities without changing the facade contract.
 The performance reference for “current Hataori” is commit
 `34cb1b1371c8b2f8ef750e2d49d10f9ef8f0782e` (2026-08-23). Before runtime work
 changes or removes the P0/P1 path, Phase A freezes a buildable benchmark runner
-for that exact commit. The baseline is immutable after candidate measurements
-begin. Existing `mpi_pi_pmap`, `mpi_mandelbrot_pmap`, and
+for that exact commit. `benchmarks/performance/manifest.toml` freezes the case
+families, host gates, statistics, thresholds, and TCP targets, with
+`scripts/check-performance-manifest.py` enforcing its hard requirements. The
+baseline and manifest are immutable after candidate measurements begin.
+Existing `mpi_pi_pmap`, `mpi_mandelbrot_pmap`, and
 `mpi_mandelbrot_hybrid` workloads seed the suite but do not by themselves
 constitute the full gate.
 
@@ -924,6 +937,9 @@ validation is not presented as a security subsystem.
 
 ### Phase A: protocol and transport foundation
 
+The implemented boundary and acceptance evidence are detailed in
+[`phase-a-transport-foundation.md`](phase-a-transport-foundation.md).
+
 - freeze the exact P0/P1 performance baseline runner and predeclare its case
   manifest before changing the measured implementation path;
 - introduce stable logical IDs, `RunId`, handshake, parcel channels, and limits;
@@ -934,10 +950,14 @@ validation is not presented as a security subsystem.
 
 ### Phase B: long-lived runtime and structured execution
 
-- add runtime lifecycle, domain registry, scopes, pending promise table,
-  deadlines, cancellation, and observability;
-- register typed actions and implement `spawn_on`/`RemoteFuture`;
-- establish bounded deduplication and control-plane progress.
+Implemented in the unpublished `hataori-runtime` crate and detailed in
+[`phase-b-runtime.md`](phase-b-runtime.md):
+
+- runtime lifecycle, domain registry, scopes, pending promise table, deadlines,
+  cancellation, and observability;
+- typed action registration and `spawn_on`/`RemoteFuture`;
+- bounded deduplication, retryable response backpressure, and control-plane
+  progress.
 
 ### Phase C: fixed-placement remote objects
 
@@ -950,13 +970,19 @@ validation is not presented as a security subsystem.
 
 ### Phase D: explicit migration
 
-- implement mobility capabilities, freeze/restore snapshots, streaming transfer,
-  epoch commit, redirects, forwarding, rollback-before-commit, and manual
-  `migrate`;
-- add reconstructible tensor adapter behavior without transferring executor or
-  context identity.
+Implemented in `hataori-runtime` and detailed in
+[`phase-d-migration.md`](phase-d-migration.md):
+
+- mobility capabilities, bounded segmented freeze/restore snapshots, epoch
+  commit, redirects, forwarding, rollback-before-commit, and manual `migrate`;
+- reconstructible object behavior that rebuilds destination-local resources
+  without transferring executor or context identity.
 
 ### Phase E: algorithms and policy
+
+Implemented algorithm/facade correctness is detailed in
+[`phase-e-algorithms.md`](phase-e-algorithms.md); performance promotion remains
+blocked until every frozen case passes on a valid host.
 
 - rebuild `pmap` and collectives over actions/futures;
 - implement the current-style facade and blocking entry, both lowering directly

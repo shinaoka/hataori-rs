@@ -1,0 +1,22 @@
+[package]
+name = "hataori-runtime-foundation"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+[features]
+default = []
+mpi = ["dep:mpi"]
+
+[dependencies]
+mpi = { version = "=0.8.1", default-features = false, optional = true }
+
+[[bin]]
+name = "tcp_transport_smoke"
+path = "src/bin/tcp_transport_smoke.rs"
+
+[[bin]]
+name = "mpi_transport_smoke"
+path = "src/bin/mpi_transport_smoke.rs"
+required-features = ["mpi"]

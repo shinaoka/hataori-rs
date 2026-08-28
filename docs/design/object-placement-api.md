@@ -1,7 +1,8 @@
 # Object placement and locality-aware task API
 
-**Status:** Accepted component of the long-term distributed-runtime design;
-implementation has not started
+**Status:** Phase C object creation, typed calls, leases, roots, weak upgrades,
+transfer, resolver routing, and colocation implemented; Phase D manual
+migration implemented; Phase E object-aware algorithms remain future work
 
 **Tracking:** [hataori-rs#14](https://github.com/shinaoka/hataori-rs/issues/14)
 
