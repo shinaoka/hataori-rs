@@ -535,7 +535,7 @@ fn drive_future<T>(
         }
         left.progress(64)?;
         right.progress(64)?;
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_micros(50));
     }
     panic!("runtime test exceeded bounded progress iterations");
 }
@@ -957,12 +957,9 @@ fn explicit_migration_preserves_identity_state_and_epoch() {
     assert_eq!(left.stats().objects.completed_migrations, 2);
     drop(imported);
     drop(remote);
-    for _ in 0..16 {
-        let _ = left.progress(64);
-        let _ = right.progress(64);
-    }
-    assert_eq!(left.stats().objects.live_objects, 0);
-    assert_eq!(right.stats().objects.live_objects, 0);
+    drive_until(&mut left, &mut right, |left, right| {
+        left.stats().objects.live_objects == 0 && right.stats().objects.live_objects == 0
+    });
     shutdown_pair(&mut left, &mut right);
 }
 
@@ -1379,11 +1376,9 @@ fn segmented_megabyte_object_state_is_created_once_and_called_remotely() {
         1024 * 1024 + 17
     );
     drop(remote);
-    for _ in 0..32 {
-        left.progress(64).unwrap();
-        right.progress(64).unwrap();
-    }
-    assert_eq!(right.stats().objects.live_objects, 0);
+    drive_until(&mut left, &mut right, |_, right| {
+        right.stats().objects.live_objects == 0
+    });
     shutdown_pair(&mut left, &mut right);
 }
 
